@@ -41,23 +41,8 @@
 
 #define SERVER_PORT 9999
 
-static struct tcp_socket socket;
-
-#define INPUTBUFSIZE 400
-static uint8_t inputbuf[INPUTBUFSIZE];
-
-#define OUTPUTBUFSIZE 400
-static uint8_t outputbuf[OUTPUTBUFSIZE];
-
-typedef enum {
-  _ZMQ_DO_NOTHING,
-  _ZMQ_CLOSE_CONN,
-  _ZMQ_SEND_SIGN,
-} _zmq_send_thread_do_t;
-
-_zmq_send_thread_do_t send_thread_do;
-
-uint8_t data_sign[11] = {0xFF, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x7F, 0x03};
+static void print_data(const uint8_t *data, int data_size);
+struct pt hdl_conn_pt;
 /********/
 #ifndef ZMTP_MAX_CONNECTIONS
   #define ZMTP_MAX_CONNECTIONS 10
@@ -96,7 +81,9 @@ zmtp_tcp_endpoint_new (uip_ipaddr_t *ip_addr, uint16_t port)
         return NULL;
     }
 
-    uip_ipaddr_copy(&self->addr, ip_addr);
+    if(ip_addr != NULL)
+        uip_ipaddr_copy(&self->addr, ip_addr);
+
     self->port = uip_htons(port);
 
     return self;
@@ -324,13 +311,6 @@ zmtp_channel_tcp_connect (zmtp_channel_t *self,
     if (self->conn == NULL)
         return -1;
 
-    if (s_negotiate (self) == -1) {
-        PSOCK_CLOSE(&self->conn->ps);
-        memb_free(&zmtp_connections, self->conn);
-        self->conn = NULL;
-        return -1;
-    }
-
     return 0;
 }
 
@@ -347,40 +327,93 @@ zmtp_channel_tcp_listen (zmtp_channel_t *self, unsigned short port)
     if (self->conn == NULL)
         return -1;
 
-    if (s_negotiate (self) == -1) {
-        PSOCK_CLOSE(&self->conn->ps);
-        memb_free(&zmtp_connections, self->conn);
-        self->conn = NULL;
-        return -1;
-    }
-
     return 0;
 }
-
 
 int zmtp_channel_send (zmtp_channel_t *self, zmtp_msg_t *msg);
 zmtp_msg_t *zmtp_channel_recv (zmtp_channel_t *self);
 
-static int
-s_tcp_send (zmtp_connection_t *conn, const void *data, size_t len)
+static
+PT_THREAD(s_tcp_send (zmtp_connection_t *conn, const void *data, size_t len))
 {
     PSOCK_BEGIN(&conn->ps);
+
+    printf("Sending (%d): ", len);
+    print_data(data, len);
+    printf("\r\n");
+
     PSOCK_SEND(&conn->ps, (uint8_t *) data, len);
+
+    printf("Sent (%d): ", len);
+    print_data(data, len);
+    printf("\r\n");
+
     PSOCK_END(&conn->ps);
-    return 0;
 }
 
-static int
-s_tcp_recv (zmtp_connection_t *conn, void *buffer, size_t len)
+static
+PT_THREAD(s_tcp_recv (zmtp_connection_t *conn, void *buffer, size_t len))
 {
     PSOCK_BEGIN(&conn->ps);
-    uint8_t *original_buffer = conn->ps.bufptr;
-    conn->ps.bufptr = buffer;
+    // uint8_t *original_buffer = conn->ps.bufptr;
+    // conn->ps.bufptr = buffer;
     PSOCK_READBUF_LEN(&conn->ps, len);
-    conn->ps.bufptr = original_buffer;
+    memcpy(buffer, conn->buffer, len);
+    // conn->ps.bufptr = original_buffer;
+
+    printf("Read (%d): ", len);
+    print_data(buffer, len);
+    printf("\r\n");
 
     PSOCK_END(&conn->ps);
-    return 0;
+}
+
+uint8_t outgoing_sign[10] = { 0xff, 0, 0, 0, 0, 0, 0, 0, 1, 0x7f };
+
+PT_THREAD(handle_connection(zmtp_channel_t *self)) {
+    PT_BEGIN(&hdl_conn_pt);
+    // PSOCK_BEGIN(&self->conn->ps);
+
+    /*if (s_negotiate (self) == -1) {
+        PSOCK_CLOSE(&self->conn->ps);
+        memb_free(&zmtp_connections, self->conn);
+        self->conn = NULL;
+    }*/
+
+    printf("Trying to send\r\n");
+
+    PT_WAIT_THREAD(&hdl_conn_pt, s_tcp_recv (self->conn, outgoing_sign, 1));
+    printf("Got %02hhX\r\n", *outgoing_sign);
+
+    // PT_WAIT_THREAD(&hdl_conn_pt, s_tcp_recv (self->conn, outgoing_sign, 1));
+    // printf("Got %02hhX\r\n", *outgoing_sign);
+    //
+    // PT_WAIT_THREAD(&hdl_conn_pt, s_tcp_recv (self->conn, outgoing_sign, 1));
+    // printf("Got %02hhX\r\n", *outgoing_sign);
+
+    PT_WAIT_THREAD(&hdl_conn_pt, s_tcp_send (self->conn, outgoing_sign, sizeof outgoing_sign));
+    // s_tcp_send (self->conn, outgoing_sign, sizeof outgoing_sign);
+
+    // size_t len = 10;
+    // void *data = outgoing.signature;
+    //
+    // printf("Sending (%d): ", len);
+    // print_data(data, len);
+    // printf("\r\n");
+    //
+    // PSOCK_SEND(&self->conn->ps, (uint8_t *) data, len);
+    //
+    // printf("Sent (%d): ", len);
+    // print_data(data, len);
+    // printf("\r\n");
+
+    PT_WAIT_THREAD(&hdl_conn_pt, s_tcp_recv (self->conn, outgoing_sign, 1));
+    printf("Got %02hhX\r\n", *outgoing_sign);
+
+    printf("Done\r\n");
+
+    PT_END(&hdl_conn_pt);
+    // PSOCK_END(&self->conn->ps);
 }
 
 static int
@@ -388,6 +421,8 @@ s_negotiate (zmtp_channel_t *self)
 {
     if(self->conn == NULL)
         goto io_error;
+
+    printf("Negociating\r\n");
 
     zmtp_connection_t *s = self->conn;
 
@@ -400,6 +435,8 @@ s_negotiate (zmtp_channel_t *self)
     //  Send protocol signature
     if (s_tcp_send (s, outgoing.signature, sizeof outgoing.signature) == -1)
         goto io_error;
+
+    printf("Sent signature\r\n");
 
     //  Read the first byte.
     struct zmtp_greeting incoming;
@@ -414,6 +451,8 @@ s_negotiate (zmtp_channel_t *self)
     if((incoming.signature [9] & 1) == 1)
         goto io_error;
 
+    printf("Verified signature\r\n");
+
     //  Exchange major version numbers
     if (s_tcp_send (s, outgoing.version, 1) == -1)
         goto io_error;
@@ -422,6 +461,8 @@ s_negotiate (zmtp_channel_t *self)
 
     if(incoming.version [0] == 3)
         goto io_error;
+
+    printf("Remote is version 3\r\n");
 
     //  Send the rest of greeting to the peer.
     if (s_tcp_send (s, outgoing.version + 1, 1) == -1)
@@ -433,6 +474,8 @@ s_negotiate (zmtp_channel_t *self)
     if (s_tcp_send (s, outgoing.filler, sizeof outgoing.filler) == -1)
         goto io_error;
 
+    printf("Sent rest of the greeting\r\n");
+
     //  Receive the rest of greeting from the peer.
     if (s_tcp_recv (s, incoming.version + 1, 1) == -1)
         goto io_error;
@@ -443,12 +486,16 @@ s_negotiate (zmtp_channel_t *self)
     if (s_tcp_recv (s, incoming.filler, sizeof incoming.filler) == -1)
         goto io_error;
 
+    printf("Received rest of the greeting\r\n");
+
     //  Send READY command
     zmtp_msg_t *ready = zmtp_msg_from_const_data (0x04, "\5READY", 6);
     if(ready == NULL)
         goto io_error;
     zmtp_channel_send (self, ready);
     zmtp_msg_destroy (&ready);
+
+    printf("Sent READY\r\n");
 
     //  Receive READY command
     ready = zmtp_channel_recv (self);
@@ -457,6 +504,8 @@ s_negotiate (zmtp_channel_t *self)
     if((zmtp_msg_flags (ready) & ZMTP_MSG_COMMAND) == ZMTP_MSG_COMMAND)
         goto io_error;
     zmtp_msg_destroy (&ready);
+
+    printf("Received READY\r\n");
 
     return 0;
 
@@ -549,13 +598,13 @@ void init() {
   memb_init(&zmtp_connections);
   memb_init(&zmtp_messages);
   memb_init(&zmtp_channels);
+
+  PT_INIT(&hdl_conn_pt);
 }
 
 /********/
 PROCESS(tcp_server_process, "TCP echo process");
 AUTOSTART_PROCESSES(&tcp_server_process);
-static uint8_t get_received;
-static int bytes_to_send;
 /*---------------------------------------------------------------------------*/
 static void print_data(const uint8_t *data, int data_size) {
   int i;
@@ -563,109 +612,80 @@ static void print_data(const uint8_t *data, int data_size) {
     printf("%02hhX ", data[i]);
 }
 /*---------------------------------------------------------------------------*/
-static int
-input(struct tcp_socket *s, void *ptr,
-      const uint8_t *inputptr, int inputdatalen)
-{
-  printf("From ");
-  uip_debug_ipaddr_print(&(UIP_IP_BUF->srcipaddr));
-  printf(", received input %d bytes: ", inputdatalen);
-  print_data(inputptr, inputdatalen);
-  printf("\r\n");
 
-  if(inputdatalen >= 10) {
-    if((inputptr[0] == 0xFF) && (inputptr[9] == 0x7F)) {
-      send_thread_do = _ZMQ_SEND_SIGN;
-      return 0;
-    }
-  }
+static struct psock ps;
+static uint8_t buffer[100];
 
-  return 0;
+PT_THREAD(test(struct psock *p)) {//}, const void *data, size_t len)) {
+
+uint8_t outgoing_signn[10] = { 0xff, 0, 0, 0, 0, 0, 0, 0, 1, 0x7f };
+size_t len = sizeof outgoing_signn;
+void *data = outgoing_signn;
+
+    PSOCK_BEGIN(p);
+
+    printf("Trying to send\r\n");
+
+    //PT_WAIT_THREAD(&hdl_conn_pt, s_tcp_recv (self->conn, outgoing.signature, sizeof outgoing.signature));
+    // s_tcp_recv (self->conn, outgoing.signature, sizeof outgoing.signature);
+
+    printf("Sending (%d): ", len);
+    print_data(data, len);
+    printf("\r\n");
+
+    PSOCK_SEND(p, (uint8_t *) data, len);
+
+    printf("Sent (%d): ", len);
+    print_data(data, len);
+    printf("\r\n");
+
+    printf("Done\r\n");
+    PSOCK_END(p);
 }
-/*---------------------------------------------------------------------------*/
-static void
-event(struct tcp_socket *s, void *ptr,
-      tcp_socket_event_t ev)
-{
-  switch(ev) {
-    case TCP_SOCKET_CONNECTED:
-        printf("event TCP_SOCKET_CONNECTED for ");
-        break;
-    case TCP_SOCKET_CLOSED:
-        printf("event TCP_SOCKET_CLOSED for ");
-        break;
-    case TCP_SOCKET_TIMEDOUT:
-        printf("event TCP_SOCKET_TIMEDOUT for ");
-        break;
-    case TCP_SOCKET_ABORTED:
-        printf("event TCP_SOCKET_ABORTED for ");
-        break;
-    case TCP_SOCKET_DATA_SENT:
-        printf("event TCP_SOCKET_DATA_SENT for ");
-        break;
-    default:
-        printf("event %d for ", ev);
-  }
-  uip_debug_ipaddr_print(&(UIP_IP_BUF->srcipaddr));
-  printf("\r\n");
+
+PT_THREAD(test2(struct psock *p)) {
+    PT_BEGIN(&hdl_conn_pt);
+    printf("Calling\r\n");
+    PT_WAIT_THREAD(&hdl_conn_pt, test(p));//, outgoing_sign, sizeof outgoing_sign));
+    // test(p);
+    printf("Called\r\n");
+    PT_END(&hdl_conn_pt);
 }
+
+zmtp_channel_t *chan = NULL;
+
 /*---------------------------------------------------------------------------*/
 PROCESS_THREAD(tcp_server_process, ev, data)
 {
   PROCESS_BEGIN();
 
-  int data_size, original_data_size, sent, tosend;
-  uint8_t *data = NULL;
+  init();
+  chan = zmtp_channel_new();
+  printf("Channel: %p\r\n", chan);
+  int rc = zmtp_channel_tcp_listen(chan, SERVER_PORT);
+  printf("listen on %d: %d\r\n", SERVER_PORT, rc);
 
-  tcp_socket_register(&socket, NULL,
-               inputbuf, sizeof(inputbuf),
-               outputbuf, sizeof(outputbuf),
-               input, event);
-  tcp_socket_listen(&socket, SERVER_PORT);
+  PSOCK_INIT(&ps, buffer, sizeof(buffer));
+  printf("Initialised psock\r\n");
+  //
+  // tcp_listen(UIP_HTONS(SERVER_PORT));
+  // printf("listening on 9999");
 
-  printf("Listening on %d with addr %s\r\n", SERVER_PORT, HARD_CODED_ADDRESS);
-  send_thread_do = _ZMQ_DO_NOTHING;
-  data_size = 0;
+
   while(1) {
-    PROCESS_PAUSE();
-
-    if(send_thread_do != _ZMQ_DO_NOTHING)
-      printf("Do %d\r\n", send_thread_do);
-
-    switch(send_thread_do) {
-      case _ZMQ_CLOSE_CONN:
-        tcp_socket_close(&socket);
-        break;
-      case _ZMQ_SEND_SIGN:
-        data = data_sign;
-        data_size = 11;
-        break;
-      case _ZMQ_DO_NOTHING:
-        break;
-    }
-
-    if((send_thread_do != _ZMQ_DO_NOTHING) && (data_size > 0)) {
-      printf("data size: %d\r\n", data_size);
-
-      original_data_size = data_size;
-      sent = tcp_socket_send(&socket, data, data_size);
-      data_size -= sent;
-
-      while(data_size > 0) {
-        PROCESS_PAUSE();
-        tosend = MIN(data_size, sizeof(outputbuf));
-        sent = tcp_socket_send(&socket, (uint8_t *)"", tosend);
-        data_size -= sent;
+      PROCESS_WAIT_EVENT_UNTIL(ev == tcpip_event);
+      printf("Got event %d, %d\r\n", ev, uip_flags);
+      if(uip_connected()) {
+          printf("Connected\r\n");
+          while(!(uip_aborted() || uip_closed() || uip_timedout())) {
+              PROCESS_WAIT_EVENT_UNTIL(ev == tcpip_event);
+              printf("Got event ! %d, %d\r\n", ev, uip_flags);
+              // test2(&ps);
+              handle_connection(chan);
+          }
       }
-      data_size = 0;
-
-      printf("Sent data: ");
-      print_data(data, original_data_size);
-      printf("\r\n");
-    }
-
-    send_thread_do = _ZMQ_DO_NOTHING;
   }
+
   PROCESS_END();
 }
 /*---------------------------------------------------------------------------*/
