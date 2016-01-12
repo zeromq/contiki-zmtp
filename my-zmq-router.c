@@ -32,6 +32,7 @@
 #include "contiki-net.h"
 #include "net/ip/uip-debug.h"
 #include "sys/cc.h"
+#include "lib/ringbuf.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -654,36 +655,167 @@ PT_THREAD(test2(struct psock *p)) {
 
 zmtp_channel_t *chan = NULL;
 
+/*---------------------------------------------------------*/
+
+static struct tcp_socket socket;
+
+#define INPUTBUFSIZE 256 // Must be power of two and no greater than 256
+static uint8_t inputbuf[INPUTBUFSIZE];
+
+#define OUTPUTBUFSIZE 400
+static uint8_t outputbuf[OUTPUTBUFSIZE];
+
+static uint8_t input_ringbuf_data[INPUTBUFSIZE];
+static struct ringbuf input_ringbuf;
+
+struct _io_thread_t {
+  struct pt *process_pt;
+  process_event_t ev;
+  process_data_t data;
+};
+typedef struct _io_thread_t io_thread_t;
+static io_thread_t io_thread;
+
+static int
+input(struct tcp_socket *s, void *ptr,
+      const uint8_t *inputptr, int inputdatalen)
+{
+  printf("From ");
+  uip_debug_ipaddr_print(&(UIP_IP_BUF->srcipaddr));
+  printf(", received input %d bytes: ", inputdatalen);
+  print_data(inputptr, inputdatalen);
+  printf("\r\n");
+
+  int i, rc;
+  for(i=0 ; i < inputdatalen ; i++) {
+    rc = ringbuf_put(&input_ringbuf, inputptr[i]);
+    if(rc == 0) { // Buffer full
+      printf("Input ring buffer is full! Discarding data as tcp-socket don't implement yet not reading everything: ");
+      print_data(inputptr + i, inputdatalen - i);
+      printf("\r\n");
+      return inputdatalen - i;
+    }
+  }
+
+  return 0;
+}
+
+static
+PT_THREAD(my_recv_(struct pt *process_pt, process_event_t ev, process_data_t data, uint8_t *buffer, size_t len, uint8_t *done)) {
+  PROCESS_BEGIN();
+
+  *done = 0;
+  while(len > 0) {
+    int read = ringbuf_get(&input_ringbuf);
+    // printf("> Read from RB: %d\r\n", read);
+    if(read == -1) {
+      // printf("> Yielding\r\n");
+      // PT_YIELD(pt);
+      PROCESS_PAUSE();
+    }else{
+      *buffer = (uint8_t) read;
+      buffer++;
+      len--;
+    }
+  }
+  printf("> Done\r\n");
+  *done = 1;
+
+  PROCESS_END();
+}
+
+static void my_recv(uint8_t *buffer, size_t len) {
+  int done;
+  do{
+    my_recv_(io_thread.process_pt, io_thread.ev, io_thread.data, buffer, len, &done);
+  }while(done == 0);
+  // while(PT_SCHEDULE(my_recv_(pt, buffer, len)));
+}
+
+static void
+event(struct tcp_socket *s, void *ptr,
+      tcp_socket_event_t ev)
+{
+  switch(ev) {
+    case TCP_SOCKET_CONNECTED:
+        printf("event TCP_SOCKET_CONNECTED for ");
+        break;
+    case TCP_SOCKET_CLOSED:
+        printf("event TCP_SOCKET_CLOSED for ");
+        break;
+    case TCP_SOCKET_TIMEDOUT:
+        printf("event TCP_SOCKET_TIMEDOUT for ");
+        break;
+    case TCP_SOCKET_ABORTED:
+        printf("event TCP_SOCKET_ABORTED for ");
+        break;
+    case TCP_SOCKET_DATA_SENT:
+        printf("event TCP_SOCKET_DATA_SENT for ");
+        break;
+    default:
+        printf("event %d for ", ev);
+  }
+  uip_debug_ipaddr_print(&(UIP_IP_BUF->srcipaddr));
+  printf("\r\n");
+}
+
+uint8_t test_buf[100];
+
 /*---------------------------------------------------------------------------*/
 PROCESS_THREAD(tcp_server_process, ev, data)
 {
+  io_thread.process_pt = process_pt;
+  io_thread.ev = ev;
+  io_thread.data = data;
   PROCESS_BEGIN();
 
   init();
-  chan = zmtp_channel_new();
-  printf("Channel: %p\r\n", chan);
-  int rc = zmtp_channel_tcp_listen(chan, SERVER_PORT);
-  printf("listen on %d: %d\r\n", SERVER_PORT, rc);
+  // chan = zmtp_channel_new();
+  // printf("Channel: %p\r\n", chan);
+  // int rc = zmtp_channel_tcp_listen(chan, SERVER_PORT);
+  // printf("listen on %d: %d\r\n", SERVER_PORT, rc);
 
-  PSOCK_INIT(&ps, buffer, sizeof(buffer));
-  printf("Initialised psock\r\n");
+  // PSOCK_INIT(&ps, buffer, sizeof(buffer));
+  // printf("Initialised psock\r\n");
   //
   // tcp_listen(UIP_HTONS(SERVER_PORT));
   // printf("listening on 9999");
 
+  // int m1i = -1;
+  // uint8_t m1c = -1;
+  //
+  // int m1ci = (int) m1c;
+  // printf("sizeof int: %d\r\n", sizeof(int));
+  // printf("m1i: %08hhX / %08X =eq -1=> %d\r\n", m1i, m1i, (m1i == -1));
+  // printf("m1ci: %08hhX /  %08X =eq -1=> %d\r\n", m1ci, m1ci, (m1ci == -1));
+
+  ringbuf_init(&input_ringbuf, input_ringbuf_data, INPUTBUFSIZE);
+
+  tcp_socket_register(&socket, NULL,
+              inputbuf, sizeof(inputbuf),
+              outputbuf, sizeof(outputbuf),
+              input, event);
+  tcp_socket_listen(&socket, SERVER_PORT);
+
 
   while(1) {
-      PROCESS_WAIT_EVENT_UNTIL(ev == tcpip_event);
-      printf("Got event %d, %d\r\n", ev, uip_flags);
-      if(uip_connected()) {
-          printf("Connected\r\n");
-          while(!(uip_aborted() || uip_closed() || uip_timedout())) {
-              PROCESS_WAIT_EVENT_UNTIL(ev == tcpip_event);
-              printf("Got event ! %d, %d\r\n", ev, uip_flags);
-              // test2(&ps);
-              handle_connection(chan);
-          }
-      }
+      // PROCESS_WAIT_EVENT_UNTIL(ev == tcpip_event);
+      // printf("Got event %d, %d\r\n", ev, uip_flags);
+      // if(uip_connected()) {
+      //     printf("Connected\r\n");
+      //     while(!(uip_aborted() || uip_closed() || uip_timedout())) {
+      //         PROCESS_WAIT_EVENT_UNTIL(ev == tcpip_event);
+      //         printf("Got event ! %d, %d\r\n", ev, uip_flags);
+      //         // test2(&ps);
+      //         handle_connection(chan);
+      //     }
+      // }
+      PROCESS_PAUSE();
+
+      my_recv(test_buf, 3);
+      printf("Got: ");
+      print_data(test_buf, 3);
+      printf("\r\n");
   }
 
   PROCESS_END();
