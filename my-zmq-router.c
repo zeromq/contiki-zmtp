@@ -260,7 +260,7 @@ zmtp_channel_t *zmtp_channel_new ()
       return NULL;
     }
 
-    zmtp_channel_register(self);
+    zmtp_channel_init(self);
 
     return self;
 }
@@ -274,7 +274,9 @@ void zmtp_channel_destroy (zmtp_channel_t **self_p)
     }
 }
 
-void zmtp_channel_register(zmtp_channel_t *self) {
+void zmtp_channel_init(zmtp_channel_t *self) {
+    PT_INIT(&self->conn.pt);
+
     tcp_socket_register(
         &self->conn.socket,
         &self->conn,
@@ -282,7 +284,6 @@ void zmtp_channel_register(zmtp_channel_t *self) {
         self->conn.outputbuf, sizeof(self->conn.outputbuf),
         zmtp_tcp_input, zmtp_tcp_event
     );
-    printf("registration done\r\n");
 }
 
 static int
@@ -298,26 +299,59 @@ int zmtp_channel_tcp_listen (zmtp_channel_t *self) {
     return 0;
 }
 
+PT_THREAD(zmtp_channel_remote_connected(zmtp_channel_t *self)) {
+    LOCAL_PT(pt);
+    PT_BEGIN(&pt);
+
+
+    printf("in remote connect\n");
+
+    static const uint8_t signature[10] = { 0xff, 0, 0, 0, 0, 0, 0, 0, 1, 0x7f };
+    // static const uint8_t signature[16] = { 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA };
+
+    PT_WAIT_THREAD(&pt, zmtp_tcp_send(&self->conn, signature, sizeof(signature)));
+
+    PT_END(&pt);
+}
+
 int zmtp_channel_send (zmtp_channel_t *self, zmtp_msg_t *msg);
 zmtp_msg_t *zmtp_channel_recv (zmtp_channel_t *self);
 
-// static
-// PT_THREAD(s_tcp_send (zmtp_connection_t *conn, const void *data, size_t len))
-// {
-//     PSOCK_BEGIN(&conn->ps);
-//
-//     printf("Sending (%d): ", len);
-//     print_data(data, len);
-//     printf("\r\n");
-//
-//     PSOCK_SEND(&conn->ps, (uint8_t *) data, len);
-//
-//     printf("Sent (%d): ", len);
-//     print_data(data, len);
-//     printf("\r\n");
-//
-//     PSOCK_END(&conn->ps);
-// }
+PT_THREAD(zmtp_tcp_send(zmtp_connection_t *conn, const uint8_t *data, size_t len)) {
+    static size_t sent, sent_all;
+    LOCAL_PT(pt);
+    PT_BEGIN(&pt);
+
+    printf("Sending (%d): ", len);
+    print_data(data, len);
+    printf("\r\n");
+
+    sent_all = 0;
+    do {
+      sent = 0;
+      PT_WAIT_THREAD(&pt, zmtp_tcp_send_inner(conn, data + sent_all, len - sent_all, &sent));
+      sent_all += sent;
+    } while(sent_all < len);
+
+    PT_END(&pt);
+}
+
+PT_THREAD(zmtp_tcp_send_inner (zmtp_connection_t *conn, const uint8_t *data, size_t len, size_t *sent)) {
+    LOCAL_PT(pt);
+    PT_BEGIN(&pt);
+
+    *sent = MIN(sizeof(conn->outputbuf), len);
+
+    conn->sent_done = 0;
+    tcp_socket_send(&conn->socket, data, *sent);
+    PT_WAIT_UNTIL(&pt, conn->sent_done == 1);
+
+    printf("Sent (%d): ", *sent);
+    print_data(data, *sent);
+    printf("\r\n");
+
+    PT_END(&pt);
+}
 //
 // static
 // PT_THREAD(s_tcp_recv (zmtp_connection_t *conn, void *buffer, size_t len))
@@ -383,7 +417,7 @@ zmtp_msg_t *zmtp_channel_recv (zmtp_channel_t *self);
 //     PT_END(&hdl_conn_pt);
 //     // PSOCK_END(&self->conn->ps);
 // }
-//
+
 // static int
 // s_negotiate (zmtp_channel_t *self)
 // {
@@ -566,11 +600,15 @@ zmtp_msg_t *zmtp_channel_recv (zmtp_channel_t *self);
 
 
 static process_event_t zmtp_do_listen;
+static process_event_t zmtp_do_remote_connected;
+static process_event_t zmtp_call_me_again;
 
 void zmtp_init() {
     static uint8_t init_done = 0;
 
     if(init_done == 0) {
+        printf("UIP_CONNS: %d\n", UIP_CONNS);
+        printf("UIP_LOGGING: %d\n", UIP_LOGGING);
         // memb_init(&zmtp_tcp_endpoints);
         // memb_init(&zmtp_connections);
         // memb_init(&zmtp_messages);
@@ -579,6 +617,8 @@ void zmtp_init() {
         // PT_INIT(&hdl_conn_pt);
 
         zmtp_do_listen = process_alloc_event();
+        zmtp_do_remote_connected = process_alloc_event();
+        zmtp_call_me_again = process_alloc_event();
 
         process_start(&zmtp_process, NULL);
 
@@ -605,9 +645,11 @@ static int zmtp_tcp_input(struct tcp_socket *s, void *conn_ptr, const uint8_t *i
 }
 
 static void zmtp_tcp_event(struct tcp_socket *s, void *conn_ptr, tcp_socket_event_t ev) {
+  zmtp_connection_t *conn = (zmtp_connection_t *) conn_ptr;
   switch(ev) {
     case TCP_SOCKET_CONNECTED:
         printf("event TCP_SOCKET_CONNECTED for ");
+        process_post(&zmtp_process, zmtp_do_remote_connected, conn);
         break;
     case TCP_SOCKET_CLOSED:
         printf("event TCP_SOCKET_CLOSED for ");
@@ -620,6 +662,8 @@ static void zmtp_tcp_event(struct tcp_socket *s, void *conn_ptr, tcp_socket_even
         break;
     case TCP_SOCKET_DATA_SENT:
         printf("event TCP_SOCKET_DATA_SENT for ");
+        conn->sent_done = 1;
+        process_post(&zmtp_process, zmtp_call_me_again, conn);
         break;
     default:
         printf("event %d for ", ev);
@@ -679,13 +723,13 @@ static void print_data(const uint8_t *data, int data_size) {
 
 /*---------------------------------------------------------*/
 
-static struct tcp_socket socket;
-
-#define INPUTBUFSIZE 256 // Must be power of two and no greater than 256
-static uint8_t inputbuf[INPUTBUFSIZE];
-
-#define OUTPUTBUFSIZE 400
-static uint8_t outputbuf[OUTPUTBUFSIZE];
+// static struct tcp_socket socket;
+//
+// #define INPUTBUFSIZE 256 // Must be power of two and no greater than 256
+// static uint8_t inputbuf[INPUTBUFSIZE];
+//
+// #define OUTPUTBUFSIZE 400
+// static uint8_t outputbuf[OUTPUTBUFSIZE];
 //
 // static uint8_t input_ringbuf_data[INPUTBUFSIZE];
 // static struct ringbuf input_ringbuf;
@@ -779,7 +823,7 @@ static uint8_t outputbuf[OUTPUTBUFSIZE];
 
 PROCESS_THREAD(zmtp_process, ev, data)
 {
-    zmtp_channel_t *chan=NULL;
+    printf("> zmtp_process %d\n", process_pt->lc);
 
     PROCESS_BEGIN();
 
@@ -831,12 +875,15 @@ PROCESS_THREAD(zmtp_process, ev, data)
       // printf("\r\n");
 
       printf("Got event %d %p\n", ev, data);
-      if(ev == tcpip_event) {
-          printf("Pausing\n");
-          PROCESS_PAUSE();
-      }else if(ev == zmtp_do_listen) {
-          chan = data;
-          zmtp_channel_tcp_listen(chan);
+      if(ev == zmtp_do_listen) {
+          zmtp_channel_tcp_listen(data);
+      }else if(ev == zmtp_do_remote_connected) {
+          printf("Do remote connect\n");
+
+          process_post(&zmtp_process, zmtp_call_me_again, data);
+          PT_WAIT_THREAD(process_pt, zmtp_channel_remote_connected(data));
+
+          printf("Connect done\n");
       }
   }
 
@@ -846,15 +893,18 @@ PROCESS_THREAD(zmtp_process, ev, data)
 PROCESS(test_router_bind, "Test process bind");
 AUTOSTART_PROCESSES(&test_router_bind);
 
-zmtp_channel_t my_chan;
+zmtp_channel_t my_chan1;
+zmtp_channel_t my_chan2;
 
 PROCESS_THREAD(test_router_bind, ev, data) {
     PROCESS_BEGIN();
 
     zmtp_init();
 
-    zmtp_channel_register(&my_chan);
-    zmtp_listen(&my_chan, SERVER_PORT);
+    zmtp_channel_init(&my_chan1);
+    zmtp_channel_init(&my_chan2);
+    zmtp_listen(&my_chan1, SERVER_PORT);
+    zmtp_listen(&my_chan2, SERVER_PORT);
 
     while(1) {
         PROCESS_PAUSE();
