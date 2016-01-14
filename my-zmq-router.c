@@ -45,17 +45,12 @@
 #define SERVER_PORT 9999
 
 static void print_data(const uint8_t *data, int data_size);
-struct pt hdl_conn_pt;
+// struct pt hdl_conn_pt;
 /********/
-#ifndef ZMTP_MAX_CONNECTIONS
-  #define ZMTP_MAX_CONNECTIONS 10
-#endif
 
-#ifndef ZMTP_MAX_ENDPOINTS
-  #define ZMTP_MAX_ENDPOINTS 2
-#endif
-
-MEMB(zmtp_connections, zmtp_connection_t, ZMTP_MAX_CONNECTIONS);
+// #ifndef ZMTP_MAX_ENDPOINTS
+//   #define ZMTP_MAX_ENDPOINTS 2
+// #endif
 
 // struct zmtp_tcp_endpoint {
 //     uip_ipaddr_t addr;
@@ -150,7 +145,7 @@ zmtp_msg_new (uint8_t flags, size_t size)
 {
     zmtp_msg_t *self = memb_alloc(&zmtp_messages);
     if(self == NULL) {
-      printf("Reached exhaustion of messages\r\n");
+      printf("ERROR: Reached exhaustion of messages\r\n");
       return NULL;
     }
 
@@ -169,7 +164,7 @@ zmtp_msg_from_data (uint8_t flags, uint8_t **data_p, size_t size)
 {
     zmtp_msg_t *self = memb_alloc(&zmtp_messages);
     if(self == NULL) {
-      printf("Reached exhaustion of messages\r\n");
+      printf("ERROR: Reached exhaustion of messages\r\n");
       return NULL;
     }
 
@@ -189,7 +184,7 @@ zmtp_msg_from_const_data (uint8_t flags, void *data, size_t size)
 {
     zmtp_msg_t *self = memb_alloc(&zmtp_messages);
     if(self == NULL) {
-      printf("Reached exhaustion of messages\r\n");
+      printf("ERROR: Reached exhaustion of messages\r\n");
       return NULL;
     }
 
@@ -251,12 +246,58 @@ struct zmtp_greeting {
 #endif
 
 MEMB(zmtp_channels, zmtp_channel_t, ZMTP_MAX_CHANNELS);
+MEMB(zmtp_connections, zmtp_connection_t, ZMTP_MAX_CONNECTIONS);
+
+zmtp_connection_t *zmtp_connection_new() {
+    zmtp_connection_t *self = memb_alloc(&zmtp_connections);
+    if(self == NULL) {
+      printf("ERROR: Reached exhaustion of connections\r\n");
+      return NULL;
+    }
+
+    zmtp_connection_init(self);
+
+    return self;
+}
+
+void zmtp_connection_destroy (zmtp_connection_t **self_p) {
+    if (*self_p) {
+        zmtp_connection_t *self = *self_p;
+        memb_free(&zmtp_connections, self);
+        *self_p = NULL;
+    }
+}
+
+void zmtp_connection_init(zmtp_connection_t *self) {
+    tcp_socket_register(
+        &self->socket,
+        self,
+        self->inputbuf, sizeof(self->inputbuf),
+        self->outputbuf, sizeof(self->outputbuf),
+        zmtp_tcp_input, zmtp_tcp_event
+    );
+}
+
+int zmtp_connection_tcp_connect (zmtp_connection_t *self) {
+    return tcp_socket_connect(&self->socket, self->addr, self->port);
+}
+
+int zmtp_connection_tcp_listen (zmtp_connection_t *self) {
+    printf("Listening on port %d\r\n", self->port);
+    return tcp_socket_listen(&self->socket, self->port);
+}
+
+int zmtp_connection_tcp_unlisten (zmtp_connection_t *self) {
+    return tcp_socket_unlisten(&self->socket);
+}
+
+/*-------------------------------------------------------------*/
 
 zmtp_channel_t *zmtp_channel_new ()
 {
     zmtp_channel_t *self = memb_alloc(&zmtp_channels);
     if(self == NULL) {
-      printf("Reached exhaustion of channels\r\n");
+      printf("ERROR: Reached exhaustion of channels\r\n");
       return NULL;
     }
 
@@ -275,51 +316,49 @@ void zmtp_channel_destroy (zmtp_channel_t **self_p)
 }
 
 void zmtp_channel_init(zmtp_channel_t *self) {
-    PT_INIT(&self->conn.pt);
+    LIST_STRUCT_INIT(self, connections);
+}
 
-    tcp_socket_register(
-        &self->conn.socket,
-        &self->conn,
-        self->conn.inputbuf, sizeof(self->conn.inputbuf),
-        self->conn.outputbuf, sizeof(self->conn.outputbuf),
-        zmtp_tcp_input, zmtp_tcp_event
-    );
+zmtp_connection_t *zmtp_channel_add_conn(zmtp_channel_t *self) {
+    zmtp_connection_t *conn = zmtp_connection_new();
+    if(conn == NULL)
+        return NULL;
+
+    conn->channel = self;
+    list_add(self->connections, conn);
+
+    return conn;
+}
+
+zmtp_channel_close_conn(zmtp_channel_t *self, zmtp_connection_t *conn) {
+    list_remove(self->connections, conn);
+    zmtp_connection_tcp_unlisten(conn);
+    zmtp_connection_destroy(&conn);
 }
 
 static int
 s_negotiate (zmtp_channel_t *self);
 
-int zmtp_channel_tcp_connect (zmtp_channel_t *self) {
-    // conn.ip_conn = tcp_connect(&self.con.addr, self.conn.port, &self.conn);
-    return tcp_socket_connect(&self->conn.socket, &self->conn.addr, self->conn.port);
-}
-
-int zmtp_channel_tcp_listen (zmtp_channel_t *self) {
-    tcp_socket_listen(&self->conn.socket, self->conn.port);
-    return 0;
-}
-
-PT_THREAD(zmtp_channel_remote_connected(zmtp_channel_t *self)) {
+PT_THREAD(zmtp_remote_connected(zmtp_connection_t *conn)) {
     LOCAL_PT(pt);
+    // printf("> zmtp_remote_connected %d\n", pt.lc);
     PT_BEGIN(&pt);
-
-
-    printf("in remote connect\n");
 
     static const uint8_t signature[10] = { 0xff, 0, 0, 0, 0, 0, 0, 0, 1, 0x7f };
     // static const uint8_t signature[16] = { 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA };
 
-    PT_WAIT_THREAD(&pt, zmtp_tcp_send(&self->conn, signature, sizeof(signature)));
+    PT_WAIT_THREAD(&pt, zmtp_tcp_send(conn, signature, sizeof(signature)));
 
     PT_END(&pt);
 }
 
-int zmtp_channel_send (zmtp_channel_t *self, zmtp_msg_t *msg);
-zmtp_msg_t *zmtp_channel_recv (zmtp_channel_t *self);
+// int zmtp_channel_send (zmtp_channel_t *self, zmtp_msg_t *msg);
+// zmtp_msg_t *zmtp_channel_recv (zmtp_channel_t *self);
 
 PT_THREAD(zmtp_tcp_send(zmtp_connection_t *conn, const uint8_t *data, size_t len)) {
     static size_t sent, sent_all;
     LOCAL_PT(pt);
+    // printf("> zmtp_tcp_send %d\n", pt.lc);
     PT_BEGIN(&pt);
 
     printf("Sending (%d): ", len);
@@ -338,6 +377,7 @@ PT_THREAD(zmtp_tcp_send(zmtp_connection_t *conn, const uint8_t *data, size_t len
 
 PT_THREAD(zmtp_tcp_send_inner (zmtp_connection_t *conn, const uint8_t *data, size_t len, size_t *sent)) {
     LOCAL_PT(pt);
+    // printf("> zmtp_tcp_send_inner %d\n", pt.lc);
     PT_BEGIN(&pt);
 
     *sent = MIN(sizeof(conn->outputbuf), len);
@@ -600,6 +640,7 @@ PT_THREAD(zmtp_tcp_send_inner (zmtp_connection_t *conn, const uint8_t *data, siz
 
 
 static process_event_t zmtp_do_listen;
+static process_event_t zmtp_do_purge_connection;
 static process_event_t zmtp_do_remote_connected;
 static process_event_t zmtp_call_me_again;
 
@@ -626,9 +667,25 @@ void zmtp_init() {
     }
 }
 
-void zmtp_listen(zmtp_channel_t *chan, unsigned short port) {
-    chan->conn.port = port;
-    process_post(&zmtp_process, zmtp_do_listen, chan);
+void print_event_name(process_event_t ev) {
+    if(ev == zmtp_do_listen) {
+        printf("zmtp_do_listen");
+    }else if(ev == zmtp_do_remote_connected) {
+        printf("zmtp_do_remote_connected");
+    }else if(ev == zmtp_call_me_again) {
+        printf("zmtp_call_me_again");
+    }
+}
+
+int zmtp_listen(zmtp_channel_t *chan, unsigned short port) {
+    zmtp_connection_t *conn = zmtp_channel_add_conn(chan);
+    if(conn == NULL)
+        return -1;
+
+    conn->port = port;
+    process_post(&zmtp_process, zmtp_do_listen, conn);
+
+    return 0;
 }
 
 /********/
@@ -646,19 +703,30 @@ static int zmtp_tcp_input(struct tcp_socket *s, void *conn_ptr, const uint8_t *i
 
 static void zmtp_tcp_event(struct tcp_socket *s, void *conn_ptr, tcp_socket_event_t ev) {
   zmtp_connection_t *conn = (zmtp_connection_t *) conn_ptr;
+  // printf("EV > %p\n", conn);
   switch(ev) {
     case TCP_SOCKET_CONNECTED:
         printf("event TCP_SOCKET_CONNECTED for ");
+
+        if(conn->addr == NULL) // Was a listen, need to create a new connection for other clients
+            zmtp_listen(conn->channel, conn->port);
+
         process_post(&zmtp_process, zmtp_do_remote_connected, conn);
         break;
     case TCP_SOCKET_CLOSED:
         printf("event TCP_SOCKET_CLOSED for ");
+        if(conn->addr == NULL)
+            zmtp_channel_close_conn(conn->channel, conn);
         break;
     case TCP_SOCKET_TIMEDOUT:
         printf("event TCP_SOCKET_TIMEDOUT for ");
+        if(conn->addr == NULL)
+            zmtp_channel_close_conn(conn->channel, conn);
         break;
     case TCP_SOCKET_ABORTED:
         printf("event TCP_SOCKET_ABORTED for ");
+        if(conn->addr == NULL)
+            zmtp_channel_close_conn(conn->channel, conn);
         break;
     case TCP_SOCKET_DATA_SENT:
         printf("event TCP_SOCKET_DATA_SENT for ");
@@ -823,7 +891,9 @@ static void print_data(const uint8_t *data, int data_size) {
 
 PROCESS_THREAD(zmtp_process, ev, data)
 {
-    printf("> zmtp_process %d\n", process_pt->lc);
+    printf("> zmtp_process %d ", process_pt->lc);
+    print_event_name(ev);
+    printf(" %p\n", data);
 
     PROCESS_BEGIN();
 
@@ -874,14 +944,14 @@ PROCESS_THREAD(zmtp_process, ev, data)
       // print_data(test_buf, 3);
       // printf("\r\n");
 
-      printf("Got event %d %p\n", ev, data);
+      // printf("Got event %d %p\n", ev, data);
       if(ev == zmtp_do_listen) {
-          zmtp_channel_tcp_listen(data);
+          zmtp_connection_tcp_listen(data);
       }else if(ev == zmtp_do_remote_connected) {
           printf("Do remote connect\n");
 
           process_post(&zmtp_process, zmtp_call_me_again, data);
-          PT_WAIT_THREAD(process_pt, zmtp_channel_remote_connected(data));
+          PT_WAIT_THREAD(process_pt, zmtp_remote_connected(data));
 
           printf("Connect done\n");
       }
@@ -893,18 +963,15 @@ PROCESS_THREAD(zmtp_process, ev, data)
 PROCESS(test_router_bind, "Test process bind");
 AUTOSTART_PROCESSES(&test_router_bind);
 
-zmtp_channel_t my_chan1;
-zmtp_channel_t my_chan2;
+zmtp_channel_t my_chan;
 
 PROCESS_THREAD(test_router_bind, ev, data) {
     PROCESS_BEGIN();
 
     zmtp_init();
 
-    zmtp_channel_init(&my_chan1);
-    zmtp_channel_init(&my_chan2);
-    zmtp_listen(&my_chan1, SERVER_PORT);
-    zmtp_listen(&my_chan2, SERVER_PORT);
+    zmtp_channel_init(&my_chan);
+    zmtp_listen(&my_chan, SERVER_PORT);
 
     while(1) {
         PROCESS_PAUSE();

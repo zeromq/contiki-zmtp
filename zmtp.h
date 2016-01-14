@@ -16,26 +16,38 @@ Limitations:
   #define ZMTP_OUTPUT_BUFFER_SIZE 10
 #endif
 
+#ifndef ZMTP_MAX_CONNECTIONS
+  #define ZMTP_MAX_CONNECTIONS 10
+#endif
+
 struct zmtp_connection {
   // struct psock ps;
   // uint8_t buffer[ZMTP_INPUT_BUFFER_SIZE];
-  struct tcp_socket socket;
-  uip_ipaddr_t addr;
-  uint16_t port;
+  struct zmtp_connection *next;
   uint8_t inputbuf[ZMTP_INPUT_BUFFER_SIZE];
   uint8_t outputbuf[ZMTP_OUTPUT_BUFFER_SIZE];
+  struct tcp_socket socket;
+  uip_ipaddr_t *addr;
+  uint16_t port;
   uint8_t sent_done;
-  struct pt pt;
+  struct _zmtp_channel_t *channel;
 };
 typedef struct zmtp_connection zmtp_connection_t;
 
 struct _zmtp_channel_t {
-    zmtp_connection_t conn;
+    LIST_STRUCT(connections);
+    // zmtp_connection_t conn;
 };
 typedef struct _zmtp_channel_t zmtp_channel_t;
 
+zmtp_connection_t *zmtp_connection_new();
+void zmtp_connection_destroy (zmtp_connection_t **self_p);
+void zmtp_connection_init(zmtp_connection_t *self);
+int zmtp_connection_tcp_connect (zmtp_connection_t *self);
+int zmtp_connection_tcp_listen (zmtp_connection_t *self);
+
 void zmtp_init();
-void zmtp_listen(zmtp_channel_t *chan, unsigned short port);
+int zmtp_listen(zmtp_channel_t *chan, unsigned short port);
 
 zmtp_channel_t *zmtp_channel_new ();
 void zmtp_channel_destroy (zmtp_channel_t **self_p);
