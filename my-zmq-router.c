@@ -269,6 +269,8 @@ void zmtp_connection_destroy (zmtp_connection_t **self_p) {
 }
 
 void zmtp_connection_init(zmtp_connection_t *self) {
+    bzero(self, sizeof(zmtp_connection_t));
+
     tcp_socket_register(
         &self->socket,
         self,
@@ -341,13 +343,36 @@ s_negotiate (zmtp_channel_t *self);
 
 PT_THREAD(zmtp_remote_connected(zmtp_connection_t *conn)) {
     LOCAL_PT(pt);
-    // printf("> zmtp_remote_connected %d\n", pt.lc);
+    printf("> zmtp_remote_connected %d\n", pt.lc);
     PT_BEGIN(&pt);
 
     static const uint8_t signature[10] = { 0xff, 0, 0, 0, 0, 0, 0, 0, 1, 0x7f };
-    // static const uint8_t signature[16] = { 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA };
 
     PT_WAIT_THREAD(&pt, zmtp_tcp_send(conn, signature, sizeof(signature)));
+
+    PT_END(&pt);
+}
+
+PT_THREAD(zmtp_send_version_major(zmtp_connection_t *conn)) {
+    LOCAL_PT(pt);
+    printf("> zmtp_send_version_major %d\n", pt.lc);
+    PT_BEGIN(&pt);
+
+    static const uint8_t version = 3;
+
+    PT_WAIT_THREAD(&pt, zmtp_tcp_send(conn, &version, 1));
+
+    PT_END(&pt);
+}
+
+PT_THREAD(zmtp_send_greeting(zmtp_connection_t *conn)) {
+    LOCAL_PT(pt);
+    printf("> zmtp_send_greeting %d\n", pt.lc);
+    PT_BEGIN(&pt);
+
+    static const uint8_t greeting[53] = { 1, 'N', 'U', 'L', 'L', '\0', 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+
+    PT_WAIT_THREAD(&pt, zmtp_tcp_send(conn, greeting, sizeof(greeting)));
 
     PT_END(&pt);
 }
@@ -640,8 +665,9 @@ PT_THREAD(zmtp_tcp_send_inner (zmtp_connection_t *conn, const uint8_t *data, siz
 
 
 static process_event_t zmtp_do_listen;
-static process_event_t zmtp_do_purge_connection;
 static process_event_t zmtp_do_remote_connected;
+static process_event_t zmtp_do_send_version_major;
+static process_event_t zmtp_do_send_greeting;
 static process_event_t zmtp_call_me_again;
 
 void zmtp_init() {
@@ -659,6 +685,8 @@ void zmtp_init() {
 
         zmtp_do_listen = process_alloc_event();
         zmtp_do_remote_connected = process_alloc_event();
+        zmtp_do_send_version_major = process_alloc_event();
+        zmtp_do_send_greeting = process_alloc_event();
         zmtp_call_me_again = process_alloc_event();
 
         process_start(&zmtp_process, NULL);
@@ -672,8 +700,14 @@ void print_event_name(process_event_t ev) {
         printf("zmtp_do_listen");
     }else if(ev == zmtp_do_remote_connected) {
         printf("zmtp_do_remote_connected");
+    }else if(ev == zmtp_do_send_version_major) {
+        printf("zmtp_do_send_version_major");
+    }else if(ev == zmtp_do_send_greeting) {
+        printf("zmtp_do_send_greeting");
     }else if(ev == zmtp_call_me_again) {
         printf("zmtp_call_me_again");
+    }else{
+        printf("%d", ev);
     }
 }
 
@@ -691,12 +725,41 @@ int zmtp_listen(zmtp_channel_t *chan, unsigned short port) {
 /********/
 
 static int zmtp_tcp_input(struct tcp_socket *s, void *conn_ptr, const uint8_t *inputptr, int inputdatalen) {
-  // zmtp_connection_t *conn = (zmtp_connection_t *) conn_ptr;
+  zmtp_connection_t *conn = (zmtp_connection_t *) conn_ptr;
   printf("From ");
   uip_debug_ipaddr_print(&(UIP_IP_BUF->srcipaddr));
   printf(", received input %d bytes: ", inputdatalen);
   print_data(inputptr, inputdatalen);
-  printf("\r\n");
+  printf(" on connection %p\r\n", conn);
+
+  if((conn->validated & CONNECTION_VALIDATED) != CONNECTION_VALIDATED) {
+      if(!(conn->validated & CONNECTION_VALIDATED_SIGNATURE)) {
+          if((inputdatalen >= 10) &&
+             (inputptr[0] == 0xFF) &&
+             (inputptr[9] == 0x7F)
+            ) {
+              conn->validated |= CONNECTION_VALIDATED_SIGNATURE;
+              process_post(&zmtp_process, zmtp_do_send_version_major, conn);
+              printf("Validated signature\n");
+              return inputdatalen - 10;
+          }else{
+              uip_close();
+              return 0;
+          }
+      }else if(!(conn->validated & CONNECTION_VALIDATED_VERSION)) {
+          if((inputdatalen >= 1) && (inputptr[0] >= 3)) {
+              conn->validated |= CONNECTION_VALIDATED_VERSION;
+              process_post(&zmtp_process, zmtp_do_send_greeting, conn);
+              printf("Validated version\n");
+              return inputdatalen - 1;
+          }else{
+              uip_close();
+              return 0;
+          }
+      }
+  }else{
+      printf("Connection is validated");
+  }
 
   return 0;
 }
@@ -951,9 +1014,26 @@ PROCESS_THREAD(zmtp_process, ev, data)
           printf("Do remote connect\n");
 
           process_post(&zmtp_process, zmtp_call_me_again, data);
-          PT_WAIT_THREAD(process_pt, zmtp_remote_connected(data));
+          // PT_WAIT_THREAD(process_pt, zmtp_remote_connected(data));
+
+          do {
+            LC_SET((process_pt)->lc);
+            if((ev != zmtp_do_remote_connected) && (ev != zmtp_call_me_again)) {
+              process_post(&zmtp_process, ev, data);
+              return PT_WAITING;
+            }
+            if((zmtp_remote_connected(data)) < PT_EXITED) {
+              return PT_WAITING;
+            }
+          } while(0);
 
           printf("Connect done\n");
+      }else if(ev == zmtp_do_send_version_major) {
+        process_post(&zmtp_process, zmtp_call_me_again, data);
+        PT_WAIT_THREAD(process_pt, zmtp_send_version_major(data));
+      }else if(ev == zmtp_do_send_greeting) {
+        process_post(&zmtp_process, zmtp_call_me_again, data);
+        PT_WAIT_THREAD(process_pt, zmtp_send_greeting(data));
       }
   }
 

@@ -13,7 +13,7 @@ Limitations:
 #endif
 
 #ifndef ZMTP_OUTPUT_BUFFER_SIZE
-  #define ZMTP_OUTPUT_BUFFER_SIZE 10
+  #define ZMTP_OUTPUT_BUFFER_SIZE 400
 #endif
 
 #ifndef ZMTP_MAX_CONNECTIONS
@@ -30,6 +30,7 @@ struct zmtp_connection {
   uip_ipaddr_t *addr;
   uint16_t port;
   uint8_t sent_done;
+  uint8_t validated;
   struct _zmtp_channel_t *channel;
 };
 typedef struct zmtp_connection zmtp_connection_t;
@@ -54,6 +55,10 @@ void zmtp_channel_destroy (zmtp_channel_t **self_p);
 void zmtp_channel_init(zmtp_channel_t *self);
 
 /*------------ PRIVATE API ------------*/
+
+#define CONNECTION_VALIDATED_SIGNATURE 0x01
+#define CONNECTION_VALIDATED_VERSION 0x02
+#define CONNECTION_VALIDATED 0x03
 
 
 PROCESS(zmtp_process, "ZMTP process");
