@@ -10,3 +10,5 @@ s.connect('tcp://fdfd::ff:fe00:10:9999')
 
 print 'Sending...'
 s.send_multipart(['Hello', 'World'])
+
+print 'Finished'

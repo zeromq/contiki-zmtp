@@ -295,7 +295,7 @@ int zmtp_connection_tcp_unlisten (zmtp_connection_t *self) {
 
 /*-------------------------------------------------------------*/
 
-zmtp_channel_t *zmtp_channel_new ()
+zmtp_channel_t *zmtp_channel_new (zmq_socket_t socket_type)
 {
     zmtp_channel_t *self = memb_alloc(&zmtp_channels);
     if(self == NULL) {
@@ -303,7 +303,7 @@ zmtp_channel_t *zmtp_channel_new ()
       return NULL;
     }
 
-    zmtp_channel_init(self);
+    zmtp_channel_init(self, socket_type);
 
     return self;
 }
@@ -317,8 +317,9 @@ void zmtp_channel_destroy (zmtp_channel_t **self_p)
     }
 }
 
-void zmtp_channel_init(zmtp_channel_t *self) {
+void zmtp_channel_init(zmtp_channel_t *self, zmq_socket_t socket_type) {
     LIST_STRUCT_INIT(self, connections);
+    self->socket_type = socket_type;
 }
 
 zmtp_connection_t *zmtp_channel_add_conn(zmtp_channel_t *self) {
@@ -332,7 +333,7 @@ zmtp_connection_t *zmtp_channel_add_conn(zmtp_channel_t *self) {
     return conn;
 }
 
-zmtp_channel_close_conn(zmtp_channel_t *self, zmtp_connection_t *conn) {
+void zmtp_channel_close_conn(zmtp_channel_t *self, zmtp_connection_t *conn) {
     list_remove(self->connections, conn);
     zmtp_connection_tcp_unlisten(conn);
     zmtp_connection_destroy(&conn);
@@ -373,6 +374,83 @@ PT_THREAD(zmtp_send_greeting(zmtp_connection_t *conn)) {
     static const uint8_t greeting[53] = { 1, 'N', 'U', 'L', 'L', '\0', 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
 
     PT_WAIT_THREAD(&pt, zmtp_tcp_send(conn, greeting, sizeof(greeting)));
+
+    PT_END(&pt);
+}
+
+PT_THREAD(zmtp_send_ready(zmtp_connection_t *conn)) {
+    // TODO: support custom DEALER identity
+
+    static int total_size;
+    static uint8_t ready[43] = {
+        0x04, // Command flag,
+        0, // Command size, to be updated
+        5, 'R', 'E', 'A', 'D', 'Y',
+        11, 'S', 'o', 'c', 'k', 'e', 't', '-', 'T', 'y', 'p', 'e',
+        0, 0, 0, 0, // Socket type length, to be updated
+        0, 0, 0, 0, 0, 0, // Longest socket name
+        8, 'I', 'd', 'e', 'n', 't', 'i', 't', 'y', 0, 0, 0, 0 // If we need identity...
+    };
+
+    switch(conn->channel->socket_type) {
+      case ZMQ_DEALER:
+        total_size = 43;
+        ready[1] = 41;
+        ready[23] = 6;
+        ready[24] = 'D'; ready[25] = 'E'; ready[26] = 'A';
+        ready[27] = 'L'; ready[28] = 'E'; ready[29] = 'R';
+        // TODO: Fixed empty identity ATM. Support for custom identity to be done.
+        break;
+      case ZMQ_ROUTER:
+        total_size = 30;
+        ready[1] = 28;
+        ready[23] = 6;
+        ready[24] = 'R'; ready[25] = 'O'; ready[26] = 'U';
+        ready[27] = 'T'; ready[28] = 'E'; ready[29] = 'R';
+        break;
+      case ZMQ_PUB:
+        total_size = 27;
+        ready[1] = 25;
+        ready[23] = 3;
+        ready[24] = 'P'; ready[25] = 'U'; ready[26] = 'B';
+        break;
+      case ZMQ_SUB:
+        total_size = 27;
+        ready[1] = 25;
+        ready[23] = 3;
+        ready[24] = 'S'; ready[25] = 'U'; ready[26] = 'B';
+        break;
+      case ZMQ_REQ:
+        total_size = 27;
+        ready[1] = 25;
+        ready[23] = 3;
+        ready[24] = 'R'; ready[25] = 'E'; ready[26] = 'Q';
+        break;
+      case ZMQ_REP:
+        total_size = 27;
+        ready[1] = 25;
+        ready[23] = 3;
+        ready[24] = 'R'; ready[25] = 'E'; ready[26] = 'P';
+        break;
+      case ZMQ_PUSH:
+        total_size = 28;
+        ready[1] = 26;
+        ready[23] = 4;
+        ready[24] = 'P'; ready[25] = 'U'; ready[26] = 'S'; ready[27] = 'H';
+        break;
+      case ZMQ_PULL:
+        total_size = 28;
+        ready[1] = 26;
+        ready[23] = 4;
+        ready[24] = 'P'; ready[25] = 'U'; ready[26] = 'L'; ready[27] = 'L';
+        break;
+    }
+
+    LOCAL_PT(pt);
+    printf("> zmtp_send_ready %d\n", pt.lc);
+    PT_BEGIN(&pt);
+
+    PT_WAIT_THREAD(&pt, zmtp_tcp_send(conn, ready, total_size));
 
     PT_END(&pt);
 }
@@ -668,26 +746,44 @@ static process_event_t zmtp_do_listen;
 static process_event_t zmtp_do_remote_connected;
 static process_event_t zmtp_do_send_version_major;
 static process_event_t zmtp_do_send_greeting;
+static process_event_t zmtp_do_send_ready;
 static process_event_t zmtp_call_me_again;
+static process_event_t zmtp_process_event;
+
+/* Native Contiki event system gets mixed up with the functioning
+of protothreads. The reentry character of it ends up inverting events order...
+Use our own event queue.
+*/
+struct zmtp_event {
+  struct zmtp_event *next;
+  process_event_t ev;
+  void *data;
+};
+typedef struct zmtp_event zmtp_event_t;
+LIST(zmtp_events);
+MEMB(zmtp_event_bank, zmtp_event_t, ZMTP_MAX_EVENTS);
 
 void zmtp_init() {
     static uint8_t init_done = 0;
 
     if(init_done == 0) {
-        printf("UIP_CONNS: %d\n", UIP_CONNS);
-        printf("UIP_LOGGING: %d\n", UIP_LOGGING);
         // memb_init(&zmtp_tcp_endpoints);
-        // memb_init(&zmtp_connections);
         // memb_init(&zmtp_messages);
         // memb_init(&zmtp_channels);
         //
         // PT_INIT(&hdl_conn_pt);
+        memb_init(&zmtp_connections);
+        memb_init(&zmtp_event_bank);
 
         zmtp_do_listen = process_alloc_event();
         zmtp_do_remote_connected = process_alloc_event();
         zmtp_do_send_version_major = process_alloc_event();
         zmtp_do_send_greeting = process_alloc_event();
+        zmtp_do_send_ready = process_alloc_event();
         zmtp_call_me_again = process_alloc_event();
+        zmtp_process_event = process_alloc_event();
+
+        list_init(zmtp_events);
 
         process_start(&zmtp_process, NULL);
 
@@ -695,17 +791,55 @@ void zmtp_init() {
     }
 }
 
+int zmtp_add_event(process_event_t ev, void *data) {
+    zmtp_event_t *event = memb_alloc(&zmtp_event_bank);
+    if(event == NULL) {
+        printf("ERROR: Reached exhaustion of events");
+        return -1;
+    }
+
+    event->ev = ev;
+    event->data = data;
+    list_add(zmtp_events, event);
+
+    return 0;
+}
+
+int zmtp_pop_event(process_event_t *ev, void **data) {
+    zmtp_event_t *event = list_pop(zmtp_events);
+    if(event == NULL)
+        return -1;
+
+    *ev = event->ev;
+    *data = event->data;
+
+    memb_free(&zmtp_event_bank, event);
+
+    return 0;
+}
+
 void print_event_name(process_event_t ev) {
     if(ev == zmtp_do_listen) {
         printf("zmtp_do_listen");
+
     }else if(ev == zmtp_do_remote_connected) {
         printf("zmtp_do_remote_connected");
+
     }else if(ev == zmtp_do_send_version_major) {
         printf("zmtp_do_send_version_major");
+
     }else if(ev == zmtp_do_send_greeting) {
         printf("zmtp_do_send_greeting");
+
+    }else if(ev == zmtp_do_send_ready) {
+        printf("zmtp_do_send_ready");
+
     }else if(ev == zmtp_call_me_again) {
         printf("zmtp_call_me_again");
+
+    }else if(ev == zmtp_process_event) {
+        printf("zmtp_process_event");
+
     }else{
         printf("%d", ev);
     }
@@ -717,7 +851,9 @@ int zmtp_listen(zmtp_channel_t *chan, unsigned short port) {
         return -1;
 
     conn->port = port;
-    process_post(&zmtp_process, zmtp_do_listen, conn);
+    zmtp_add_event(zmtp_do_listen, conn);
+    process_post(&zmtp_process, zmtp_process_event, conn);
+    // process_post(&zmtp_process, zmtp_do_listen, conn);
 
     return 0;
 }
@@ -739,26 +875,138 @@ static int zmtp_tcp_input(struct tcp_socket *s, void *conn_ptr, const uint8_t *i
              (inputptr[9] == 0x7F)
             ) {
               conn->validated |= CONNECTION_VALIDATED_SIGNATURE;
-              process_post(&zmtp_process, zmtp_do_send_version_major, conn);
+              zmtp_add_event(zmtp_do_send_version_major, conn);
+              process_post(&zmtp_process, zmtp_process_event, conn);
               printf("Validated signature\n");
               return inputdatalen - 10;
           }else{
+              printf("WARNING: Remote sent bad signature\n");
               uip_close();
               return 0;
           }
       }else if(!(conn->validated & CONNECTION_VALIDATED_VERSION)) {
           if((inputdatalen >= 1) && (inputptr[0] >= 3)) {
               conn->validated |= CONNECTION_VALIDATED_VERSION;
-              process_post(&zmtp_process, zmtp_do_send_greeting, conn);
+              zmtp_add_event(zmtp_do_send_greeting, conn);
+              process_post(&zmtp_process, zmtp_process_event, conn);
               printf("Validated version\n");
               return inputdatalen - 1;
           }else{
+              printf("WARNING: Remote sent unsupported/bad version\n");
+              uip_close();
+              return 0;
+          }
+      }else if(!(conn->validated & CONNECTION_VALIDATED_GREETING)) {
+          if(inputdatalen >= 53) {
+              conn->validated |= CONNECTION_VALIDATED_GREETING;
+              printf("Validated greeting\n");
+              zmtp_add_event(zmtp_do_send_ready, conn);
+              process_post(&zmtp_process, zmtp_process_event, conn);
+              return inputdatalen - 53;
+          }else{
+              printf("WARNING: Remote sent bad greeting version\n");
+              uip_close();
+              return 0;
+          }
+      }else if(!(conn->validated & CONNECTION_VALIDATED_READY)) {
+          uint8_t size_offset;
+          if(!(inputptr[0] & 0x02))
+              size_offset = 1;
+          else
+              size_offset = 8;
+
+          if((inputdatalen >= (7 + size_offset)) &&
+             (inputptr[0] & 0x04) && // Command flag
+             (inputptr[1+size_offset] == 5) && // len('READY')
+             (!strncmp(&inputptr[2+size_offset], "READY", 5))
+            ) {
+              conn->validated |= CONNECTION_VALIDATED_READY;
+              printf("Validated ready\n");
+              const uint8_t *pos = &inputptr[8 + size_offset];
+              while(pos < (inputptr + inputdatalen)) {
+                  uint8_t field_name_size = *pos++;
+                  printf("field_name_size: %d\n", field_name_size);
+                  printf("%p >= %p : %p\n", (pos + field_name_size), (inputptr + inputdatalen), (pos + field_name_size) >= (inputptr + inputdatalen));
+                  if((pos + field_name_size) >= (inputptr + inputdatalen)) {
+                      printf("WARNING: Remote sent bad field name size\n");
+                      uip_close();
+                      return 0;
+                  }
+                  const char *field_name = pos;
+                  pos += field_name_size;
+                  if((pos + 4) >= (inputptr + inputdatalen)) {
+                      printf("WARNING: Remote did not sent enought data for field name\n");
+                      uip_close();
+                      return 0;
+                  }
+                  // TODO: deal with endiannes
+                  uint32_t value_size = (pos[0] << 24) | (pos[1] << 16) | (pos[2] << 8) | pos[3];
+                  pos += 4;
+                  if((pos + value_size) >= (inputptr + inputdatalen)) {
+                      printf("WARNING: Remote sent bad field value size\n");
+                      uip_close();
+                      return 0;
+                  }
+                  const char *field_value = pos;
+
+                  if((field_name_size == 11) && !strncasecmp(field_name, "Socket-Type", 11)) {
+                      printf("Got field Socket-Type\n");
+                      zmq_socket_t socket_type;
+                      if(value_size == 3) {
+                          if(!strncmp(field_value, "PUB", 3))
+                              socket_type = ZMQ_PUB;
+                          else if(!strncmp(field_value, "SUB", 3))
+                              socket_type = ZMQ_SUB;
+                          else if(!strncmp(field_value, "REQ", 3))
+                              socket_type = ZMQ_REQ;
+                          else if(!strncmp(field_value, "REP", 3))
+                              socket_type = ZMQ_REP;
+                          else{
+                              printf("WARNING: Remote sent bad socket type\n");
+                              uip_close();
+                              return 0;
+                          }
+                      }else if(value_size == 4) {
+                          if(!strncmp(field_value, "PUSH", 4))
+                              socket_type = ZMQ_PUSH;
+                          else if(!strncmp(field_value, "PULL", 4))
+                              socket_type = ZMQ_PULL;
+                          else{
+                              printf("WARNING: Remote sent bad socket type\n");
+                              uip_close();
+                              return 0;
+                          }
+                      }else if(value_size == 6) {
+                          if(!strncmp(field_value, "DEALER", 6))
+                              socket_type = ZMQ_DEALER;
+                          else if(!strncmp(field_value, "ROUTER", 6))
+                              socket_type = ZMQ_PULL;
+                          else{
+                              printf("WARNING: Remote sent bad socket type\n");
+                              uip_close();
+                              return 0;
+                          }
+                      }else{
+                          printf("WARNING: Remote sent bad socket type\n");
+                          uip_close();
+                          return 0;
+                      }
+                      printf("Socket type is %d\n", socket_type);
+                  }else if((field_name_size == 8) && !strncasecmp(field_name, "Identity", 8)) {
+                      char buf[128];
+                      strncpy(buf, field_value, value_size);
+                      buf[value_size] = 0;
+                      printf("Got Identity %s\n", buf);
+                  }
+              }
+          }else{
+              printf("WARNING: Remote sent bad ready\n");
               uip_close();
               return 0;
           }
       }
   }else{
-      printf("Connection is validated");
+      printf("Connection is validated\n");
   }
 
   return 0;
@@ -774,7 +1022,9 @@ static void zmtp_tcp_event(struct tcp_socket *s, void *conn_ptr, tcp_socket_even
         if(conn->addr == NULL) // Was a listen, need to create a new connection for other clients
             zmtp_listen(conn->channel, conn->port);
 
-        process_post(&zmtp_process, zmtp_do_remote_connected, conn);
+        zmtp_add_event(zmtp_do_remote_connected, conn);
+        process_post(&zmtp_process, zmtp_process_event, conn);
+        // process_post(&zmtp_process, zmtp_do_remote_connected, conn);
         break;
     case TCP_SOCKET_CLOSED:
         printf("event TCP_SOCKET_CLOSED for ");
@@ -954,9 +1204,9 @@ static void print_data(const uint8_t *data, int data_size) {
 
 PROCESS_THREAD(zmtp_process, ev, data)
 {
-    printf("> zmtp_process %d ", process_pt->lc);
-    print_event_name(ev);
-    printf(" %p\n", data);
+    // printf("> zmtp_process %d ", process_pt->lc);
+    // print_event_name(ev);
+    // printf(" %p\n", data);
 
     PROCESS_BEGIN();
 
@@ -1008,32 +1258,34 @@ PROCESS_THREAD(zmtp_process, ev, data)
       // printf("\r\n");
 
       // printf("Got event %d %p\n", ev, data);
+      if(ev == zmtp_process_event) {
+          if(zmtp_pop_event(&ev, &data) != 0)
+              continue;
+          printf(">> Event is now ");
+          print_event_name(ev);
+          printf(" %p\n", data);
+      }
+
       if(ev == zmtp_do_listen) {
           zmtp_connection_tcp_listen(data);
       }else if(ev == zmtp_do_remote_connected) {
           printf("Do remote connect\n");
-
           process_post(&zmtp_process, zmtp_call_me_again, data);
-          // PT_WAIT_THREAD(process_pt, zmtp_remote_connected(data));
-
-          do {
-            LC_SET((process_pt)->lc);
-            if((ev != zmtp_do_remote_connected) && (ev != zmtp_call_me_again)) {
-              process_post(&zmtp_process, ev, data);
-              return PT_WAITING;
-            }
-            if((zmtp_remote_connected(data)) < PT_EXITED) {
-              return PT_WAITING;
-            }
-          } while(0);
-
+          PROCESS_WAIT_THREAD(zmtp_remote_connected(data), zmtp_do_remote_connected);
           printf("Connect done\n");
+
       }else if(ev == zmtp_do_send_version_major) {
         process_post(&zmtp_process, zmtp_call_me_again, data);
-        PT_WAIT_THREAD(process_pt, zmtp_send_version_major(data));
+        PROCESS_WAIT_THREAD(zmtp_send_version_major(data), zmtp_do_send_version_major);
+
       }else if(ev == zmtp_do_send_greeting) {
         process_post(&zmtp_process, zmtp_call_me_again, data);
-        PT_WAIT_THREAD(process_pt, zmtp_send_greeting(data));
+        PROCESS_WAIT_THREAD(zmtp_send_greeting(data), zmtp_do_send_greeting);
+
+      }else if(ev == zmtp_do_send_ready) {
+        process_post(&zmtp_process, zmtp_call_me_again, data);
+        PROCESS_WAIT_THREAD(zmtp_send_ready(data), zmtp_do_send_ready);
+
       }
   }
 
@@ -1050,7 +1302,7 @@ PROCESS_THREAD(test_router_bind, ev, data) {
 
     zmtp_init();
 
-    zmtp_channel_init(&my_chan);
+    zmtp_channel_init(&my_chan, ZMQ_ROUTER);
     zmtp_listen(&my_chan, SERVER_PORT);
 
     while(1) {

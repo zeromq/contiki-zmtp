@@ -4,6 +4,7 @@
 /*
 Limitations:
 - Only one endpoint/connection per channel (eg. one bind or one connect).
+- Dealer does not support custom identity
 */
 
 /*------------ PUBLIC API -------------*/
@@ -19,6 +20,17 @@ Limitations:
 #ifndef ZMTP_MAX_CONNECTIONS
   #define ZMTP_MAX_CONNECTIONS 10
 #endif
+
+typedef enum {
+    ZMQ_ROUTER,
+    ZMQ_DEALER,
+    ZMQ_PUB,
+    ZMQ_SUB,
+    ZMQ_REQ,
+    ZMQ_REP,
+    ZMQ_PUSH,
+    ZMQ_PULL
+} zmq_socket_t;
 
 struct zmtp_connection {
   // struct psock ps;
@@ -38,6 +50,7 @@ typedef struct zmtp_connection zmtp_connection_t;
 struct _zmtp_channel_t {
     LIST_STRUCT(connections);
     // zmtp_connection_t conn;
+    zmq_socket_t socket_type;
 };
 typedef struct _zmtp_channel_t zmtp_channel_t;
 
@@ -52,13 +65,22 @@ int zmtp_listen(zmtp_channel_t *chan, unsigned short port);
 
 zmtp_channel_t *zmtp_channel_new ();
 void zmtp_channel_destroy (zmtp_channel_t **self_p);
-void zmtp_channel_init(zmtp_channel_t *self);
+void zmtp_channel_init(zmtp_channel_t *self, zmq_socket_t socket_type);
 
 /*------------ PRIVATE API ------------*/
 
 #define CONNECTION_VALIDATED_SIGNATURE 0x01
 #define CONNECTION_VALIDATED_VERSION 0x02
-#define CONNECTION_VALIDATED 0x03
+#define CONNECTION_VALIDATED_GREETING 0x04
+#define CONNECTION_VALIDATED_READY 0x08
+#define CONNECTION_VALIDATED CONNECTION_VALIDATED_SIGNATURE | \
+                             CONNECTION_VALIDATED_VERSION | \
+                             CONNECTION_VALIDATED_GREETING | \
+                             CONNECTION_VALIDATED_READY
+
+#ifndef ZMTP_MAX_EVENTS
+  #define ZMTP_MAX_EVENTS 50
+#endif
 
 
 PROCESS(zmtp_process, "ZMTP process");
@@ -76,13 +98,16 @@ static void print_data(const uint8_t *data, int data_size);
 
 #define LOCAL_PT(pt_) static struct pt pt_; static uint8_t pt_inited=0; if(pt_inited == 0) { PT_INIT(&pt_); pt_inited = 1; }
 
-#define PROCESS_WAIT_THREAD(thread) \
-  do {						\
-    PT_YIELD_FLAG = 0;				\
-    LC_SET((pt)->lc);				\
-    if((PT_YIELD_FLAG == 0) || !(cond)) {	\
-      return PT_YIELDED;			\
-    }						\
-  } while(0)
+#define PROCESS_WAIT_THREAD(thread, valid_ev) \
+    do { \
+      LC_SET((process_pt)->lc); \
+      if((ev != valid_ev) && (ev != zmtp_call_me_again)) { \
+        process_post(&zmtp_process, ev, data); \
+        return PT_WAITING; \
+      } \
+      if(PT_SCHEDULE(thread)) { \
+        return PT_WAITING; \
+      } \
+    } while(0);
 
 #endif
