@@ -12,3 +12,6 @@ print 'Sending...'
 s.send_multipart(['Hello', 'World'])
 
 print 'Finished'
+
+while(True):
+    s.send(raw_input('> '))

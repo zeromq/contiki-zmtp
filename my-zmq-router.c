@@ -420,6 +420,18 @@ PT_THREAD(zmtp_send_ready(zmtp_connection_t *conn)) {
         ready[23] = 3;
         ready[24] = 'S'; ready[25] = 'U'; ready[26] = 'B';
         break;
+      case ZMQ_XPUB:
+        total_size = 28;
+        ready[1] = 26;
+        ready[23] = 4;
+        ready[24] = 'X'; ready[25] = 'P'; ready[26] = 'U'; ready[27] = 'B';
+        break;
+      case ZMQ_XSUB:
+        total_size = 28;
+        ready[1] = 26;
+        ready[23] = 4;
+        ready[24] = 'X'; ready[25] = 'S'; ready[26] = 'U'; ready[27] = 'B';
+        break;
       case ZMQ_REQ:
         total_size = 27;
         ready[1] = 25;
@@ -495,7 +507,7 @@ PT_THREAD(zmtp_tcp_send_inner (zmtp_connection_t *conn, const uint8_t *data, siz
 
     PT_END(&pt);
 }
-//
+
 // static
 // PT_THREAD(s_tcp_recv (zmtp_connection_t *conn, void *buffer, size_t len))
 // {
@@ -922,19 +934,18 @@ static int zmtp_tcp_input(struct tcp_socket *s, void *conn_ptr, const uint8_t *i
             ) {
               conn->validated |= CONNECTION_VALIDATED_READY;
               printf("Validated ready\n");
-              const uint8_t *pos = &inputptr[8 + size_offset];
+
+              const uint8_t *pos = &inputptr[7 + size_offset];
               while(pos < (inputptr + inputdatalen)) {
                   uint8_t field_name_size = *pos++;
-                  printf("field_name_size: %d\n", field_name_size);
-                  printf("%p >= %p : %p\n", (pos + field_name_size), (inputptr + inputdatalen), (pos + field_name_size) >= (inputptr + inputdatalen));
-                  if((pos + field_name_size) >= (inputptr + inputdatalen)) {
+                  if((pos + field_name_size) > (inputptr + inputdatalen)) {
                       printf("WARNING: Remote sent bad field name size\n");
                       uip_close();
                       return 0;
                   }
                   const char *field_name = pos;
                   pos += field_name_size;
-                  if((pos + 4) >= (inputptr + inputdatalen)) {
+                  if((pos + 4) > (inputptr + inputdatalen)) {
                       printf("WARNING: Remote did not sent enought data for field name\n");
                       uip_close();
                       return 0;
@@ -942,46 +953,100 @@ static int zmtp_tcp_input(struct tcp_socket *s, void *conn_ptr, const uint8_t *i
                   // TODO: deal with endiannes
                   uint32_t value_size = (pos[0] << 24) | (pos[1] << 16) | (pos[2] << 8) | pos[3];
                   pos += 4;
-                  if((pos + value_size) >= (inputptr + inputdatalen)) {
+                  if((pos + value_size) > (inputptr + inputdatalen)) {
                       printf("WARNING: Remote sent bad field value size\n");
                       uip_close();
                       return 0;
                   }
                   const char *field_value = pos;
+                  pos += value_size;
 
                   if((field_name_size == 11) && !strncasecmp(field_name, "Socket-Type", 11)) {
-                      printf("Got field Socket-Type\n");
                       zmq_socket_t socket_type;
                       if(value_size == 3) {
-                          if(!strncmp(field_value, "PUB", 3))
+                          if(!strncmp(field_value, "PUB", 3)) {
                               socket_type = ZMQ_PUB;
-                          else if(!strncmp(field_value, "SUB", 3))
+                              if((conn->channel->socket_type != ZMQ_SUB) && (conn->channel->socket_type != ZMQ_XSUB)) {
+                                  printf("WARNING: Can't connect something else than a SUB or XSUB to a PUB\n");
+                                  uip_close();
+                                  return 0;
+                              }
+                          }else if(!strncmp(field_value, "SUB", 3)) {
                               socket_type = ZMQ_SUB;
-                          else if(!strncmp(field_value, "REQ", 3))
+                              if((conn->channel->socket_type != ZMQ_PUB) && (conn->channel->socket_type != ZMQ_XPUB)) {
+                                  printf("WARNING: Can't connect something else than a PUB or XPUB to a SUB\n");
+                                  uip_close();
+                                  return 0;
+                              }
+                          }else if(!strncmp(field_value, "REQ", 3)) {
                               socket_type = ZMQ_REQ;
-                          else if(!strncmp(field_value, "REP", 3))
+                              if((conn->channel->socket_type != ZMQ_REP) && (conn->channel->socket_type != ZMQ_ROUTER)) {
+                                  printf("WARNING: Can't connect something else than a REP or ROUTER to a REQ\n");
+                                  uip_close();
+                                  return 0;
+                              }
+                          }else if(!strncmp(field_value, "REP", 3)) {
                               socket_type = ZMQ_REP;
-                          else{
+                              if((conn->channel->socket_type != ZMQ_REQ) && (conn->channel->socket_type != ZMQ_DEALER)) {
+                                  printf("WARNING: Can't connect something else than a REQ or DEALER to a REQ\n");
+                                  uip_close();
+                                  return 0;
+                              }
+                          }else{
                               printf("WARNING: Remote sent bad socket type\n");
                               uip_close();
                               return 0;
                           }
                       }else if(value_size == 4) {
-                          if(!strncmp(field_value, "PUSH", 4))
+                          if(!strncmp(field_value, "PUSH", 4)) {
                               socket_type = ZMQ_PUSH;
-                          else if(!strncmp(field_value, "PULL", 4))
+                              if(conn->channel->socket_type != ZMQ_PULL) {
+                                  printf("WARNING: Can't connect something else than a PULL to a PUSH\n");
+                                  uip_close();
+                                  return 0;
+                              }
+                          }else if(!strncmp(field_value, "PULL", 4)) {
                               socket_type = ZMQ_PULL;
-                          else{
+                              if(conn->channel->socket_type != ZMQ_PUSH) {
+                                  printf("WARNING: Can't connect something else than a PUSH to a PULL\n");
+                                  uip_close();
+                                  return 0;
+                              }
+                          }else if(!strncmp(field_value, "XPUB", 4)) {
+                              socket_type = ZMQ_XPUB;
+                              if((conn->channel->socket_type != ZMQ_SUB) && (conn->channel->socket_type != ZMQ_XSUB)) {
+                                  printf("WARNING: Can't connect something else than a SUB or XSUB to a XPUB\n");
+                                  uip_close();
+                                  return 0;
+                              }
+                          }else if(!strncmp(field_value, "XSUB", 4)) {
+                              socket_type = ZMQ_XSUB;
+                              if((conn->channel->socket_type != ZMQ_PUB) && (conn->channel->socket_type != ZMQ_XPUB)) {
+                                  printf("WARNING: Can't connect something else than a PUB or XPUB to a XSUB\n");
+                                  uip_close();
+                                  return 0;
+                              }
+                          }else{
                               printf("WARNING: Remote sent bad socket type\n");
                               uip_close();
                               return 0;
                           }
                       }else if(value_size == 6) {
-                          if(!strncmp(field_value, "DEALER", 6))
+                          if(!strncmp(field_value, "DEALER", 6)) {
                               socket_type = ZMQ_DEALER;
-                          else if(!strncmp(field_value, "ROUTER", 6))
-                              socket_type = ZMQ_PULL;
-                          else{
+                              if((conn->channel->socket_type != ZMQ_REP) && (conn->channel->socket_type != ZMQ_DEALER) && (conn->channel->socket_type != ZMQ_ROUTER)) {
+                                  printf("WARNING: Can't connect something else than a REP, DEALER or ROUTER to a DEALER\n");
+                                  uip_close();
+                                  return 0;
+                              }
+                          }else if(!strncmp(field_value, "ROUTER", 6)) {
+                              socket_type = ZMQ_ROUTER;
+                              if((conn->channel->socket_type != ZMQ_REQ) && (conn->channel->socket_type != ZMQ_DEALER) && (conn->channel->socket_type != ZMQ_ROUTER)) {
+                                  printf("WARNING: Can't connect something else than a REQ, DEALER or ROUTER to a ROUTER\n");
+                                  uip_close();
+                                  return 0;
+                              }
+                          }else{
                               printf("WARNING: Remote sent bad socket type\n");
                               uip_close();
                               return 0;
@@ -991,7 +1056,7 @@ static int zmtp_tcp_input(struct tcp_socket *s, void *conn_ptr, const uint8_t *i
                           uip_close();
                           return 0;
                       }
-                      printf("Socket type is %d\n", socket_type);
+                      printf("Got socket type %d\n", socket_type);
                   }else if((field_name_size == 8) && !strncasecmp(field_name, "Identity", 8)) {
                       char buf[128];
                       strncpy(buf, field_value, value_size);
@@ -1214,13 +1279,13 @@ PROCESS_THREAD(zmtp_process, ev, data)
   // printf("Channel: %p\r\n", chan);
   // int rc = zmtp_channel_tcp_listen(chan, SERVER_PORT);
   // printf("listen on %d: %d\r\n", SERVER_PORT, rc);
-
+//
   // PSOCK_INIT(&ps, buffer, sizeof(buffer));
   // printf("Initialised psock\r\n");
   //
   // tcp_listen(UIP_HTONS(SERVER_PORT));
   // printf("listening on 9999");
-
+//
   // int m1i = -1;
   // uint8_t m1c = -1;
   //
@@ -1228,7 +1293,7 @@ PROCESS_THREAD(zmtp_process, ev, data)
   // printf("sizeof int: %d\r\n", sizeof(int));
   // printf("m1i: %08hhX / %08X =eq -1=> %d\r\n", m1i, m1i, (m1i == -1));
   // printf("m1ci: %08hhX /  %08X =eq -1=> %d\r\n", m1ci, m1ci, (m1ci == -1));
-
+//
   // ringbuf_init(&input_ringbuf, input_ringbuf_data, INPUTBUFSIZE);
   //
   // tcp_socket_register(&my_chan.conn.socket, NULL,
@@ -1251,7 +1316,7 @@ PROCESS_THREAD(zmtp_process, ev, data)
       //         handle_connection(chan);
       //     }
       // }
-
+//
       // my_recv(test_buf, 3);
       // printf("Got: ");
       // print_data(test_buf, 3);

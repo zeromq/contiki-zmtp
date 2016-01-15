@@ -3,8 +3,8 @@
 
 /*
 Limitations:
-- Only one endpoint/connection per channel (eg. one bind or one connect).
 - Dealer does not support custom identity
+- Blocks processing of incoming data and other outgoing data when sending to a peer
 */
 
 /*------------ PUBLIC API -------------*/
@@ -26,6 +26,8 @@ typedef enum {
     ZMQ_DEALER,
     ZMQ_PUB,
     ZMQ_SUB,
+    ZMQ_XPUB,
+    ZMQ_XSUB,
     ZMQ_REQ,
     ZMQ_REP,
     ZMQ_PUSH,
@@ -63,7 +65,7 @@ int zmtp_connection_tcp_listen (zmtp_connection_t *self);
 void zmtp_init();
 int zmtp_listen(zmtp_channel_t *chan, unsigned short port);
 
-zmtp_channel_t *zmtp_channel_new ();
+zmtp_channel_t *zmtp_channel_new (zmq_socket_t socket_type);
 void zmtp_channel_destroy (zmtp_channel_t **self_p);
 void zmtp_channel_init(zmtp_channel_t *self, zmq_socket_t socket_type);
 
@@ -73,10 +75,10 @@ void zmtp_channel_init(zmtp_channel_t *self, zmq_socket_t socket_type);
 #define CONNECTION_VALIDATED_VERSION 0x02
 #define CONNECTION_VALIDATED_GREETING 0x04
 #define CONNECTION_VALIDATED_READY 0x08
-#define CONNECTION_VALIDATED CONNECTION_VALIDATED_SIGNATURE | \
-                             CONNECTION_VALIDATED_VERSION | \
-                             CONNECTION_VALIDATED_GREETING | \
-                             CONNECTION_VALIDATED_READY
+#define CONNECTION_VALIDATED (CONNECTION_VALIDATED_SIGNATURE | \
+                              CONNECTION_VALIDATED_VERSION   | \
+                              CONNECTION_VALIDATED_GREETING  | \
+                              CONNECTION_VALIDATED_READY)
 
 #ifndef ZMTP_MAX_EVENTS
   #define ZMTP_MAX_EVENTS 50
