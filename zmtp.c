@@ -36,6 +36,7 @@
 #include "lib/ringbuf.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 
 #define UIP_IP_BUF   ((struct uip_tcpip_hdr *)&uip_buf[UIP_LLH_LEN])
 
@@ -415,10 +416,48 @@ PT_THREAD(zmtp_send_ready(zmtp_connection_t *conn)) {
     PT_END(&pt);
 }
 
+PT_THREAD(zmtp_send_msg(zmtp_connection_t *conn, zmq_msg_t *msg)) {
+    static uint8_t *buffer;
+    static int total_size;
+    LOCAL_PT(pt);
+    printf("> zmtp_send_msg %d\n", pt.lc);
+    PT_BEGIN(&pt);
+
+    int size_size = ((zmq_msg_size(msg) > 255) ? 8 : 1);
+    total_size = zmq_msg_size(msg) + 1 + size_size;
+    buffer = malloc(total_size);
+
+    buffer[0] = zmq_msg_flags(msg);
+    if(size_size == 1) {
+        buffer[1] = zmq_msg_size(msg);
+    }else{
+        buffer[0] |= ZMQ_MSG_LARGE;
+        buffer[1] = (zmq_msg_size(msg) >> 56) & 0xFF;
+        buffer[2] = (zmq_msg_size(msg) >> 48) & 0xFF;
+        buffer[3] = (zmq_msg_size(msg) >> 40) & 0xFF;
+        buffer[4] = (zmq_msg_size(msg) >> 32) & 0xFF;
+        buffer[5] = (zmq_msg_size(msg) >> 24) & 0xFF;
+        buffer[6] = (zmq_msg_size(msg) >> 16) & 0xFF;
+        buffer[7] = (zmq_msg_size(msg) >> 8) & 0xFF;
+        buffer[8] = zmq_msg_size(msg) & 0xFF;
+    }
+
+    memcpy(buffer+size_size+1, zmq_msg_data(msg), zmq_msg_size(msg));
+
+    if(buffer != NULL) {
+        PT_WAIT_THREAD(&pt, zmtp_tcp_send(conn, buffer, total_size));
+        zmq_msg_destroy(&msg);
+        free(buffer);
+    }else
+        printf("ERROR: Not enought memory\r\n");
+
+    PT_END(&pt);
+}
+
 PT_THREAD(zmtp_tcp_send(zmtp_connection_t *conn, const uint8_t *data, size_t len)) {
     static size_t sent, sent_all;
     LOCAL_PT(pt);
-    // printf("> zmtp_tcp_send %d\n", pt.lc);
+    printf("> zmtp_tcp_send %d %p %d\n", pt.lc, data, len);
     PT_BEGIN(&pt);
 
     printf("Sending (%d): ", (int) len);
@@ -1183,6 +1222,10 @@ static void print_data(const uint8_t *data, int data_size) {
 
 /*---------------------------------------------------------------------------*/
 
+int zmtp_process_post(process_event_t ev, process_data_t data) {
+    return process_post(&zmtp_process, ev, data);
+}
+
 PROCESS_THREAD(zmtp_process, ev, data)
 {
     // printf("> zmtp_process %d ", process_pt->lc);
@@ -1267,6 +1310,16 @@ PROCESS_THREAD(zmtp_process, ev, data)
       }else if(ev == zmtp_do_send_ready) {
         process_post(&zmtp_process, zmtp_call_me_again, data);
         PROCESS_WAIT_THREAD(zmtp_send_ready(data), zmtp_do_send_ready);
+
+      }else if(ev == zmq_socket_output_activity) {
+        static zmq_msg_t *msg = NULL;
+        msg = zmtp_connection_pop_out_msg(data);
+        if(msg == NULL) // ?!
+            continue;
+
+        process_post(&zmtp_process, zmtp_call_me_again, data);
+        PROCESS_WAIT_THREAD(zmtp_send_msg(data, msg), zmq_socket_output_activity);
+        process_post(((zmtp_connection_t *) data)->channel->notify_process, zmq_socket_output_activity, NULL);
 
       }
   }

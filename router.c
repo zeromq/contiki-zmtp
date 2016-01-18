@@ -6,12 +6,15 @@
 
 
 void zmq_router_init(zmq_socket_t *self) {
-  self->connect = zmq_router_connect;
-  // self->signal = zmq_router_signal;
-  self->bind = zmq_router_bind;
-  self->recv = zmq_router_recv;
-  self->recv_multipart = zmq_router_recv_multipart;
-  self->send = zmq_router_send;
+    self->in_conn = NULL;
+    self->out_conn = NULL;
+
+    self->connect = zmq_router_connect;
+    // self->signal = zmq_router_signal;
+    self->bind = zmq_router_bind;
+    self->recv = zmq_router_recv;
+    self->recv_multipart = zmq_router_recv_multipart;
+    self->send = zmq_router_send;
 }
 
 /*void zmq_router_signal(zmq_socket_t *self, zmtp_channel_signal_t signal) {
@@ -39,36 +42,36 @@ PT_THREAD(zmq_router_recv(zmq_socket_t *self, zmq_msg_t **msg_ptr)) {
     // printf("> zmq_router_recv %d\n", pt.lc);
     PT_BEGIN(&pt);
 
-    if(self->current_conn == NULL)
-        self->current_conn = list_head(self->channel.connections);
+    if(self->in_conn == NULL)
+        self->in_conn = list_head(self->channel.connections);
     else{
         // Detect if the current_conn disconnected meanwhile
         zmtp_connection_t *scan = list_head(self->channel.connections);
-        while(scan != self->current_conn)
+        while(scan != self->in_conn)
             scan = list_item_next(scan);
-        if(scan != self->current_conn)
-            self->current_conn = list_head(self->channel.connections);
+        if(scan != self->in_conn)
+            self->in_conn = list_head(self->channel.connections);
     }
 
     zmq_msg_t *msg = NULL;
     while(1) {
-        while(self->current_conn != NULL) {
-            msg = zmtp_connection_pop_in_msg(self->current_conn);
+        while(self->in_conn != NULL) {
+            msg = zmtp_connection_pop_in_msg(self->in_conn);
             if(msg != NULL) {
                 *msg_ptr = msg;
                 if((zmq_msg_flags(msg) & ZMQ_MSG_MORE) != ZMQ_MSG_MORE)
-                    self->current_conn = list_item_next(self->current_conn);
+                    self->in_conn = list_item_next(self->in_conn);
                 break;
             }
-            self->current_conn = list_item_next(self->current_conn);
+            self->in_conn = list_item_next(self->in_conn);
         }
 
         if(msg != NULL)
             break;
 
-        if(self->current_conn == NULL) {
+        if(self->in_conn == NULL) {
             PT_YIELD(&pt);
-            self->current_conn = list_head(self->channel.connections);
+            self->in_conn = list_head(self->channel.connections);
             msg = NULL;
             continue;
         }
@@ -88,13 +91,21 @@ PT_THREAD(zmq_router_recv_multipart(zmq_socket_t *self, list_t msg_list)) {
         list_add(msg_list, msg);
     } while((zmq_msg_flags(msg) & ZMQ_MSG_MORE) == ZMQ_MSG_MORE);
 
-
     PT_END(&pt);
 }
 
+// Take ownership of the message and will destroy it
 PT_THREAD(zmq_router_send(zmq_socket_t *self, zmq_msg_t *msg_ptr)) {
+    static zmtp_connection_t *conn;
+    // TODO: implement HWM
     LOCAL_PT(pt);
     PT_BEGIN(&pt);
+
+    // TODO: deal with identity instead
+    conn = list_head(self->channel.connections);
+    zmtp_connection_add_out_msg(conn, msg_ptr);
+    zmtp_process_post(zmq_socket_output_activity, conn);
+    PT_WAIT_UNTIL(&pt, conn->out_size <= 0);
 
     PT_END(&pt);
 }

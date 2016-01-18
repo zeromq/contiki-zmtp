@@ -46,6 +46,9 @@ PROCESS_THREAD(test_router_bind, ev, data) {
             zmq_msg_destroy(&msg);
             msg = list_pop(read_list);
         }
+
+        msg = zmq_msg_from_const_data(0, "Hi there!", 9);
+        PT_WAIT_THREAD(process_pt, my_sock.send(&my_sock, msg));
     }
 
     PROCESS_END();

@@ -99,7 +99,8 @@ typedef enum {
 
 struct zmq_socket {
     zmtp_channel_t channel;
-    zmtp_connection_t *current_conn;
+    zmtp_connection_t *in_conn;
+    zmtp_connection_t *out_conn;
     // void (*signal) (struct zmq_socket *self, zmtp_channel_signal_t signal);
     int (*connect) (struct zmq_socket *self, uip_ipaddr_t *addr, unsigned short port);
     int (*bind) (struct zmq_socket *self, unsigned short port);

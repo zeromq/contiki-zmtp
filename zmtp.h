@@ -21,4 +21,6 @@ zmtp_channel_t *zmtp_channel_new (zmq_socket_type_t socket_type, struct process 
 void zmtp_channel_destroy (zmtp_channel_t **self_p);
 void zmtp_channel_init(zmtp_channel_t *self, zmq_socket_type_t socket_type, struct process *p);
 
+int zmtp_process_post(process_event_t ev, process_data_t data);
+
 #endif

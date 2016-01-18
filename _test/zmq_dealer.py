@@ -14,4 +14,5 @@ s.send_multipart(['Hello', 'World'])
 print 'Finished'
 
 while(True):
+    print '< ', s.recv_multipart()
     s.send_multipart(raw_input('> ').split(' '))
