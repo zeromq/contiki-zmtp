@@ -6,7 +6,7 @@ all: my-zmq-router
 #PROJECT_SOURCEFILES += zmq.c
 #PROJECT_SOURCEFILES += my-zmq-router.c
 
-PROJECT_SOURCEFILES = zmtp.c router.c
+PROJECT_SOURCEFILES = zmtp.c router.c zmq.c
 
 CONTIKI=contiki
 CONTIKI_WITH_IPV6 = 1

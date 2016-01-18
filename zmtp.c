@@ -36,8 +36,6 @@
 #include "lib/ringbuf.h"
 
 #include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
 
 #define UIP_IP_BUF   ((struct uip_tcpip_hdr *)&uip_buf[UIP_LLH_LEN])
 
@@ -84,11 +82,11 @@ static void print_data(const uint8_t *data, int data_size);
 
 // struct pt hdl_conn_pt;
 /********/
-
+//
 // #ifndef ZMTP_MAX_ENDPOINTS
 //   #define ZMTP_MAX_ENDPOINTS 2
 // #endif
-
+//
 // struct zmtp_tcp_endpoint {
 //     uip_ipaddr_t addr;
 //     uint16_t port;
@@ -156,127 +154,7 @@ static void print_data(const uint8_t *data, int data_size);
 
 /*-----------------------------------------------------------*/
 
-enum {
-    ZMTP_MSG_MORE = 1,
-    ZMTP_MSG_COMMAND = 4,
-};
-
-#ifndef ZMTP_MAX_MSGS
-  #define ZMTP_MAX_MSGS 4
-#endif
-
-struct _zmtp_msg_t {
-    uint8_t flags;                 //  Flags byte for message
-    uint8_t *data;                 //  Data part of message
-    size_t size;                //  Size of data in bytes
-    uint8_t greedy;                //  Did we take ownership of data?
-};
-typedef struct _zmtp_msg_t zmtp_msg_t;
-MEMB(zmtp_messages, zmtp_msg_t, ZMTP_MAX_MSGS);
-
-//  Constructor; it allocates buffer for message data.
-//  The initial content of the allocated buffer is undefined.
-
-zmtp_msg_t *
-zmtp_msg_new (uint8_t flags, size_t size)
-{
-    zmtp_msg_t *self = memb_alloc(&zmtp_messages);
-    if(self == NULL) {
-      printf("ERROR: Reached exhaustion of messages\r\n");
-      return NULL;
-    }
-
-    self->flags = flags;
-    self->data = (uint8_t *) malloc (size);
-    self->size = size;
-    self->greedy = 1;
-    return self;
-}
-
-//  Constructor; takes ownership of data and frees it when destroying the
-//  message. Nullifies the data reference.
-
-zmtp_msg_t *
-zmtp_msg_from_data (uint8_t flags, uint8_t **data_p, size_t size)
-{
-    zmtp_msg_t *self = memb_alloc(&zmtp_messages);
-    if(self == NULL) {
-      printf("ERROR: Reached exhaustion of messages\r\n");
-      return NULL;
-    }
-
-    self->flags = flags;
-    self->data = *data_p;
-    self->size = size;
-    self->greedy = 1;
-    *data_p = NULL;
-    return self;
-}
-
-//  Constructor that takes a constant data and does not copy, modify, or
-//  free it.
-
-zmtp_msg_t *
-zmtp_msg_from_const_data (uint8_t flags, void *data, size_t size)
-{
-    zmtp_msg_t *self = memb_alloc(&zmtp_messages);
-    if(self == NULL) {
-      printf("ERROR: Reached exhaustion of messages\r\n");
-      return NULL;
-    }
-
-    self->flags = flags;
-    self->data = data;
-    self->size = size;
-    self->greedy = 0;
-    return self;
-}
-
-void
-zmtp_msg_destroy (zmtp_msg_t **self_p)
-{
-    if (*self_p) {
-        zmtp_msg_t *self = *self_p;
-        if (self->greedy)
-            free (self->data);
-        memb_free (&zmtp_messages, self);
-        *self_p = NULL;
-    }
-}
-
-uint8_t
-zmtp_msg_flags (zmtp_msg_t *self)
-{
-    return self->flags;
-}
-
-uint8_t *
-zmtp_msg_data (zmtp_msg_t *self)
-{
-    return self->data;
-}
-
-size_t
-zmtp_msg_size (zmtp_msg_t *self)
-{
-    return self->size;
-}
-
 /*-----------------------------------------------------------*/
-
-enum {
-    ZMTP_MORE_FLAG = 1,
-    ZMTP_LARGE_FLAG = 2,
-    ZMTP_COMMAND_FLAG = 4,
-};
-
-struct zmtp_greeting {
-    uint8_t signature [10];
-    uint8_t version [2];
-    uint8_t mechanism [20];
-    uint8_t as_server [1];
-    uint8_t filler [31];
-};
 
 #ifndef ZMTP_MAX_CHANNELS
   #define ZMTP_MAX_CHANNELS 10
@@ -307,6 +185,8 @@ void zmtp_connection_destroy (zmtp_connection_t **self_p) {
 
 void zmtp_connection_init(zmtp_connection_t *self) {
     bzero(self, sizeof(zmtp_connection_t));
+    LIST_STRUCT_INIT(self, in_queue);
+    LIST_STRUCT_INIT(self, out_queue);
 
     tcp_socket_register(
         &self->socket,
@@ -330,9 +210,41 @@ int zmtp_connection_tcp_unlisten (zmtp_connection_t *self) {
     return tcp_socket_unlisten(&self->socket);
 }
 
+int zmtp_connection_add_in_msg(zmtp_connection_t *self, zmq_msg_t *msg) {
+    // TODO implement HWM
+    list_add(self->in_queue, msg);
+    self->in_size++;
+
+    return 0;
+}
+
+zmq_msg_t *zmtp_connection_pop_in_msg(zmtp_connection_t *self) {
+    zmq_msg_t *msg = list_pop(self->in_queue);
+    if(msg != NULL)
+        self->in_size--;
+
+    return msg;
+}
+
+int zmtp_connection_add_out_msg(zmtp_connection_t *self, zmq_msg_t *msg) {
+    // TODO implement HWM
+    list_add(self->out_queue, msg);
+    self->out_size++;
+
+    return 0;
+}
+
+zmq_msg_t *zmtp_connection_pop_out_msg(zmtp_connection_t *self) {
+    zmq_msg_t *msg =  list_pop(self->out_queue);
+    if(msg != NULL)
+        self->out_size--;
+
+    return msg;
+}
+
 /*-------------------------------------------------------------*/
 
-zmtp_channel_t *zmtp_channel_new (zmq_socket_t socket_type)
+zmtp_channel_t *zmtp_channel_new (zmq_socket_type_t socket_type, struct process *p)
 {
     zmtp_channel_t *self = memb_alloc(&zmtp_channels);
     if(self == NULL) {
@@ -340,7 +252,7 @@ zmtp_channel_t *zmtp_channel_new (zmq_socket_t socket_type)
       return NULL;
     }
 
-    zmtp_channel_init(self, socket_type);
+    zmtp_channel_init(self, socket_type, p);
 
     return self;
 }
@@ -354,9 +266,11 @@ void zmtp_channel_destroy (zmtp_channel_t **self_p)
     }
 }
 
-void zmtp_channel_init(zmtp_channel_t *self, zmq_socket_t socket_type) {
+void zmtp_channel_init(zmtp_channel_t *self, zmq_socket_type_t socket_type, struct process *p) {
     LIST_STRUCT_INIT(self, connections);
     self->socket_type = socket_type;
+
+    self->notify_process = p;
 }
 
 zmtp_connection_t *zmtp_channel_add_conn(zmtp_channel_t *self) {
@@ -501,9 +415,6 @@ PT_THREAD(zmtp_send_ready(zmtp_connection_t *conn)) {
     PT_END(&pt);
 }
 
-// int zmtp_channel_send (zmtp_channel_t *self, zmtp_msg_t *msg);
-// zmtp_msg_t *zmtp_channel_recv (zmtp_channel_t *self);
-
 PT_THREAD(zmtp_tcp_send(zmtp_connection_t *conn, const uint8_t *data, size_t len)) {
     static size_t sent, sent_all;
     LOCAL_PT(pt);
@@ -558,7 +469,7 @@ PT_THREAD(zmtp_tcp_send_inner (zmtp_connection_t *conn, const uint8_t *data, siz
 //
 //     PSOCK_END(&conn->ps);
 // }
-
+//
 // uint8_t outgoing_sign[10] = { 0xff, 0, 0, 0, 0, 0, 0, 0, 1, 0x7f };
 //
 // PT_THREAD(handle_connection(zmtp_channel_t *self)) {
@@ -606,7 +517,7 @@ PT_THREAD(zmtp_tcp_send_inner (zmtp_connection_t *conn, const uint8_t *data, siz
 //     PT_END(&hdl_conn_pt);
 //     // PSOCK_END(&self->conn->ps);
 // }
-
+//
 // static int
 // s_negotiate (zmtp_channel_t *self)
 // {
@@ -703,7 +614,7 @@ PT_THREAD(zmtp_tcp_send_inner (zmtp_connection_t *conn, const uint8_t *data, siz
 // io_error:
 //     return -1;
 // }
-
+//
 // int
 // zmtp_channel_send (zmtp_channel_t *self, zmtp_msg_t *msg)
 // {
@@ -741,48 +652,6 @@ PT_THREAD(zmtp_tcp_send_inner (zmtp_connection_t *conn, const uint8_t *data, siz
 //     return 0;
 // }
 //
-// zmtp_msg_t *
-// zmtp_channel_recv (zmtp_channel_t *self)
-// {
-//     uint8_t frame_flags;
-//     size_t size;
-//
-//     if (s_tcp_recv (self->conn, &frame_flags, 1) == -1)
-//         return NULL;
-//     //  Check large flag
-//     if ((frame_flags & ZMTP_LARGE_FLAG) == 0) {
-//         uint8_t buffer [1];
-//         if (s_tcp_recv (self->conn, buffer, 1) == -1)
-//             return NULL;
-//         size = (size_t) buffer [0];
-//     }
-//     else {
-//         uint8_t buffer [8];
-//         if (s_tcp_recv (self->conn, buffer, sizeof buffer) == -1)
-//             return NULL;
-//         size = (uint64_t) buffer [0] << 56 |
-//                (uint64_t) buffer [1] << 48 |
-//                (uint64_t) buffer [2] << 40 |
-//                (uint64_t) buffer [3] << 32 |
-//                (uint64_t) buffer [4] << 24 |
-//                (uint64_t) buffer [5] << 16 |
-//                (uint64_t) buffer [6] << 8  |
-//                (uint64_t) buffer [7];
-//     }
-//     uint8_t *data = malloc (size);
-//     if(data == NULL)
-//         return NULL;
-//     if (s_tcp_recv (self->conn, data, size) == -1) {
-//         free (data);
-//         return NULL;
-//     }
-//     uint8_t msg_flags = 0;
-//     if ((frame_flags & ZMTP_MORE_FLAG) == ZMTP_MORE_FLAG)
-//         msg_flags |= ZMTP_MSG_MORE;
-//     if ((frame_flags & ZMTP_COMMAND_FLAG) == ZMTP_COMMAND_FLAG)
-//         msg_flags |= ZMTP_MSG_COMMAND;
-//     return zmtp_msg_from_data (msg_flags, &data, size);
-// }
 
 /*---------------------------------------------------*/
 
@@ -956,13 +825,13 @@ static int zmtp_tcp_input(struct tcp_socket *s, void *conn_ptr, const uint8_t *i
           }
       }else if(!(conn->validated & CONNECTION_VALIDATED_READY)) {
           uint8_t size_offset;
-          if(!(inputptr[0] & 0x02))
+          if(!(inputptr[0] & ZMQ_MSG_LARGE))
               size_offset = 1;
           else
               size_offset = 8;
 
           if((inputdatalen >= (7 + size_offset)) &&
-             (inputptr[0] & 0x04) && // Command flag
+             (inputptr[0] & ZMQ_MSG_COMMAND) && // Command flag
              (inputptr[1+size_offset] == 5) && // len('READY')
              (!strncmp((const char *) &inputptr[2+size_offset], "READY", 5))
             ) {
@@ -996,7 +865,7 @@ static int zmtp_tcp_input(struct tcp_socket *s, void *conn_ptr, const uint8_t *i
                   pos += value_size;
 
                   if((field_name_size == 11) && !strncasecmp(field_name, "Socket-Type", 11)) {
-                      zmq_socket_t socket_type;
+                      zmq_socket_type_t socket_type;
                       if(value_size == 3) {
                           if(!strncmp(field_value, "PUB", 3)) {
                               socket_type = ZMQ_PUB;
@@ -1106,6 +975,19 @@ static int zmtp_tcp_input(struct tcp_socket *s, void *conn_ptr, const uint8_t *i
       }
   }else{
       printf("Connection is validated\n");
+      int read = 0;
+      const uint8_t *pos = inputptr;
+      while(pos < (inputptr + inputdatalen)) {
+          zmq_msg_t *msg = _zmq_msg_from_wire(pos, inputdatalen, &read);
+          if(msg == NULL) {
+              uip_close();
+              return 0;
+          }
+          pos += read;
+          printf("Read a message from wire\n");
+          zmtp_connection_add_in_msg(conn, msg);
+          process_post(conn->channel->notify_process, zmq_socket_input_activity, NULL);
+      }
   }
 
   return 0;
@@ -1367,6 +1249,7 @@ PROCESS_THREAD(zmtp_process, ev, data)
 
       if(ev == zmtp_do_listen) {
           zmtp_connection_tcp_listen(data);
+
       }else if(ev == zmtp_do_remote_connected) {
           printf("Do remote connect\n");
           process_post(&zmtp_process, zmtp_call_me_again, data);
