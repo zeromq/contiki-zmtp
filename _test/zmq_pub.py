@@ -1,16 +1,19 @@
+import time
 import zmq
 
 ctx = zmq.Context()
-s = ctx.socket(zmq.DEALER)
+s = ctx.socket(zmq.PUB)
 s.setsockopt(zmq.IPV6, 1)
 
 s.connect('tcp://fdfd::ff:fe00:10:9999')
 #s.connect('tcp://aaaa::900:f4ff:7439:8bc6:9999')
 #s.connect('tcp://0:0:0:0:0:0:0:1:9999')
 
-print 'Sending...'
-s.send_multipart(['Hello', 'World'])
-
+i = 1
 while(True):
-    print '< ', s.recv_multipart()
-    s.send_multipart(raw_input('> ').split(' '))
+    msg = 'Hi there! ' + str(i)
+    print 'Sending:', msg
+    s.send(msg)
+
+    time.sleep(3)
+    i += 1

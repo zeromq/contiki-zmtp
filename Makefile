@@ -1,12 +1,6 @@
-#CONTIKI_PROJECT=my-zmq-router
-#all: $(CONTIKI_PROJECT)
-all: my-zmq-router
-#all: example-psock-server
+all: my-zmq-dealer my-zmq-pub my-zmq-sub
 
-#PROJECT_SOURCEFILES += zmq.c
-#PROJECT_SOURCEFILES += my-zmq-router.c
-
-PROJECT_SOURCEFILES = zmtp.c router.c zmq.c
+PROJECT_SOURCEFILES = zmtp.c router.c dealer.c push.c pull.c pub.c sub.c zmq.c
 
 CONTIKI=contiki
 CONTIKI_WITH_IPV6 = 1

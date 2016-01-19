@@ -40,19 +40,9 @@
 
 #define UIP_IP_BUF   ((struct uip_tcpip_hdr *)&uip_buf[UIP_LLH_LEN])
 
-#define CONNECTION_VALIDATED_SIGNATURE 0x01
-#define CONNECTION_VALIDATED_VERSION 0x02
-#define CONNECTION_VALIDATED_GREETING 0x04
-#define CONNECTION_VALIDATED_READY 0x08
-#define CONNECTION_VALIDATED (CONNECTION_VALIDATED_SIGNATURE | \
-                              CONNECTION_VALIDATED_VERSION   | \
-                              CONNECTION_VALIDATED_GREETING  | \
-                              CONNECTION_VALIDATED_READY)
-
 #ifndef ZMTP_MAX_EVENTS
   #define ZMTP_MAX_EVENTS 50
 #endif
-
 
 PROCESS(zmtp_process, "ZMTP process");
 
@@ -66,8 +56,6 @@ int zmtp_channel_tcp_listen (zmtp_channel_t *self);
 PT_THREAD(zmtp_channel_remote_connected(zmtp_channel_t *self));
 
 static void print_data(const uint8_t *data, int data_size);
-
-#define LOCAL_PT(pt_) static struct pt pt_; static uint8_t pt_inited=0; if(pt_inited == 0) { PT_INIT(&pt_); pt_inited = 1; }
 
 #define PROCESS_WAIT_THREAD(thread, valid_ev) \
     do { \
@@ -179,6 +167,10 @@ zmtp_connection_t *zmtp_connection_new() {
 void zmtp_connection_destroy (zmtp_connection_t **self_p) {
     if (*self_p) {
         zmtp_connection_t *self = *self_p;
+
+        // Shall it cleanes the in/out queues?
+        // Shall it destroys the messages in those queues? (nb. we are not owner of these objects)
+
         memb_free(&zmtp_connections, self);
         *self_p = NULL;
     }
@@ -188,6 +180,7 @@ void zmtp_connection_init(zmtp_connection_t *self) {
     bzero(self, sizeof(zmtp_connection_t));
     LIST_STRUCT_INIT(self, in_queue);
     LIST_STRUCT_INIT(self, out_queue);
+    LIST_STRUCT_INIT(self, sub_topics);
 
     tcp_socket_register(
         &self->socket,
@@ -203,7 +196,7 @@ int zmtp_connection_tcp_connect (zmtp_connection_t *self) {
 }
 
 int zmtp_connection_tcp_listen (zmtp_connection_t *self) {
-    printf("Listening on port %d\r\n", self->port);
+    PRINTF("Listening on port %d\r\n", self->port);
     return tcp_socket_listen(&self->socket, self->port);
 }
 
@@ -245,7 +238,7 @@ zmq_msg_t *zmtp_connection_pop_out_msg(zmtp_connection_t *self) {
 
 /*-------------------------------------------------------------*/
 
-zmtp_channel_t *zmtp_channel_new (zmq_socket_type_t socket_type, struct process *p)
+zmtp_channel_t *zmtp_channel_new (zmq_socket_type_t socket_type, struct process *in_p, struct process *out_p)
 {
     zmtp_channel_t *self = memb_alloc(&zmtp_channels);
     if(self == NULL) {
@@ -253,7 +246,7 @@ zmtp_channel_t *zmtp_channel_new (zmq_socket_type_t socket_type, struct process 
       return NULL;
     }
 
-    zmtp_channel_init(self, socket_type, p);
+    zmtp_channel_init(self, socket_type, in_p, out_p);
 
     return self;
 }
@@ -267,11 +260,12 @@ void zmtp_channel_destroy (zmtp_channel_t **self_p)
     }
 }
 
-void zmtp_channel_init(zmtp_channel_t *self, zmq_socket_type_t socket_type, struct process *p) {
+void zmtp_channel_init(zmtp_channel_t *self, zmq_socket_type_t socket_type, struct process *in_p, struct process *out_p) {
     LIST_STRUCT_INIT(self, connections);
     self->socket_type = socket_type;
 
-    self->notify_process = p;
+    self->notify_process_input = in_p;
+    self->notify_process_output = out_p;
 }
 
 zmtp_connection_t *zmtp_channel_add_conn(zmtp_channel_t *self) {
@@ -293,7 +287,7 @@ void zmtp_channel_close_conn(zmtp_channel_t *self, zmtp_connection_t *conn) {
 
 PT_THREAD(zmtp_remote_connected(zmtp_connection_t *conn)) {
     LOCAL_PT(pt);
-    printf("> zmtp_remote_connected %d\n", pt.lc);
+    PRINTF("> zmtp_remote_connected %d\n", pt.lc);
     PT_BEGIN(&pt);
 
     static const uint8_t signature[10] = { 0xff, 0, 0, 0, 0, 0, 0, 0, 1, 0x7f };
@@ -305,7 +299,7 @@ PT_THREAD(zmtp_remote_connected(zmtp_connection_t *conn)) {
 
 PT_THREAD(zmtp_send_version_major(zmtp_connection_t *conn)) {
     LOCAL_PT(pt);
-    printf("> zmtp_send_version_major %d\n", pt.lc);
+    PRINTF("> zmtp_send_version_major %d\n", pt.lc);
     PT_BEGIN(&pt);
 
     static const uint8_t version = 3;
@@ -317,7 +311,7 @@ PT_THREAD(zmtp_send_version_major(zmtp_connection_t *conn)) {
 
 PT_THREAD(zmtp_send_greeting(zmtp_connection_t *conn)) {
     LOCAL_PT(pt);
-    printf("> zmtp_send_greeting %d\n", pt.lc);
+    PRINTF("> zmtp_send_greeting %d\n", pt.lc);
     PT_BEGIN(&pt);
 
     static const uint8_t greeting[53] = { 1, 'N', 'U', 'L', 'L', '\0', 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
@@ -408,7 +402,7 @@ PT_THREAD(zmtp_send_ready(zmtp_connection_t *conn)) {
     }
 
     LOCAL_PT(pt);
-    printf("> zmtp_send_ready %d\n", pt.lc);
+    PRINTF("> zmtp_send_ready %d\n", pt.lc);
     PT_BEGIN(&pt);
 
     PT_WAIT_THREAD(&pt, zmtp_tcp_send(conn, ready, total_size));
@@ -420,33 +414,33 @@ PT_THREAD(zmtp_send_msg(zmtp_connection_t *conn, zmq_msg_t *msg)) {
     static uint8_t *buffer;
     static int total_size;
     LOCAL_PT(pt);
-    printf("> zmtp_send_msg %d\n", pt.lc);
+    PRINTF("> zmtp_send_msg %d\n", pt.lc);
     PT_BEGIN(&pt);
 
     int size_size = ((zmq_msg_size(msg) > 255) ? 8 : 1);
     total_size = zmq_msg_size(msg) + 1 + size_size;
     buffer = malloc(total_size);
 
-    buffer[0] = zmq_msg_flags(msg);
-    if(size_size == 1) {
-        buffer[1] = zmq_msg_size(msg);
-    }else{
-        buffer[0] |= ZMQ_MSG_LARGE;
-        buffer[1] = (zmq_msg_size(msg) >> 56) & 0xFF;
-        buffer[2] = (zmq_msg_size(msg) >> 48) & 0xFF;
-        buffer[3] = (zmq_msg_size(msg) >> 40) & 0xFF;
-        buffer[4] = (zmq_msg_size(msg) >> 32) & 0xFF;
-        buffer[5] = (zmq_msg_size(msg) >> 24) & 0xFF;
-        buffer[6] = (zmq_msg_size(msg) >> 16) & 0xFF;
-        buffer[7] = (zmq_msg_size(msg) >> 8) & 0xFF;
-        buffer[8] = zmq_msg_size(msg) & 0xFF;
-    }
-
-    memcpy(buffer+size_size+1, zmq_msg_data(msg), zmq_msg_size(msg));
-
     if(buffer != NULL) {
+        buffer[0] = zmq_msg_flags(msg);
+        if(size_size == 1) {
+            buffer[1] = zmq_msg_size(msg);
+        }else{
+            buffer[0] |= ZMQ_MSG_LARGE;
+            buffer[1] = (zmq_msg_size(msg) >> 56) & 0xFF;
+            buffer[2] = (zmq_msg_size(msg) >> 48) & 0xFF;
+            buffer[3] = (zmq_msg_size(msg) >> 40) & 0xFF;
+            buffer[4] = (zmq_msg_size(msg) >> 32) & 0xFF;
+            buffer[5] = (zmq_msg_size(msg) >> 24) & 0xFF;
+            buffer[6] = (zmq_msg_size(msg) >> 16) & 0xFF;
+            buffer[7] = (zmq_msg_size(msg) >> 8) & 0xFF;
+            buffer[8] = zmq_msg_size(msg) & 0xFF;
+        }
+
+        memcpy(buffer+size_size+1, zmq_msg_data(msg), zmq_msg_size(msg));
+
         PT_WAIT_THREAD(&pt, zmtp_tcp_send(conn, buffer, total_size));
-        zmq_msg_destroy(&msg);
+
         free(buffer);
     }else
         printf("ERROR: Not enought memory\r\n");
@@ -457,12 +451,14 @@ PT_THREAD(zmtp_send_msg(zmtp_connection_t *conn, zmq_msg_t *msg)) {
 PT_THREAD(zmtp_tcp_send(zmtp_connection_t *conn, const uint8_t *data, size_t len)) {
     static size_t sent, sent_all;
     LOCAL_PT(pt);
-    printf("> zmtp_tcp_send %d %p %d\n", pt.lc, data, len);
+    // PRINTF("> zmtp_tcp_send %d %p %d\n", pt.lc, data, len);
     PT_BEGIN(&pt);
 
-    printf("Sending (%d): ", (int) len);
+    PRINTF("Sending (%d): ", (int) len);
+    #if (DEBUG) & DEBUG_PRINT
     print_data(data, len);
-    printf("\r\n");
+    #endif
+    PRINTF("\r\n");
 
     sent_all = 0;
     do {
@@ -476,7 +472,7 @@ PT_THREAD(zmtp_tcp_send(zmtp_connection_t *conn, const uint8_t *data, size_t len
 
 PT_THREAD(zmtp_tcp_send_inner (zmtp_connection_t *conn, const uint8_t *data, size_t len, size_t *sent)) {
     LOCAL_PT(pt);
-    // printf("> zmtp_tcp_send_inner %d\n", pt.lc);
+    // PRINTF("> zmtp_tcp_send_inner %d\n", pt.lc);
     PT_BEGIN(&pt);
 
     *sent = MIN(sizeof(conn->outputbuf), len);
@@ -485,9 +481,11 @@ PT_THREAD(zmtp_tcp_send_inner (zmtp_connection_t *conn, const uint8_t *data, siz
     tcp_socket_send(&conn->socket, data, *sent);
     PT_WAIT_UNTIL(&pt, conn->sent_done == 1);
 
-    printf("Sent (%d): ", (int) *sent);
+    PRINTF("Sent (%d): ", (int) *sent);
+    #if (DEBUG) & DEBUG_PRINT
     print_data(data, *sent);
-    printf("\r\n");
+    #endif
+    PRINTF("\r\n");
 
     PT_END(&pt);
 }
@@ -748,7 +746,7 @@ void zmtp_init() {
 int zmtp_add_event(process_event_t ev, void *data) {
     zmtp_event_t *event = memb_alloc(&zmtp_event_bank);
     if(event == NULL) {
-        printf("ERROR: Reached exhaustion of events");
+        printf("ERROR: Reached exhaustion of events\r\n");
         return -1;
     }
 
@@ -774,28 +772,67 @@ int zmtp_pop_event(process_event_t *ev, void **data) {
 
 void print_event_name(process_event_t ev) {
     if(ev == zmtp_do_listen) {
-        printf("zmtp_do_listen");
+        PRINTF("zmtp_do_listen");
 
     }else if(ev == zmtp_do_remote_connected) {
-        printf("zmtp_do_remote_connected");
+        PRINTF("zmtp_do_remote_connected");
 
     }else if(ev == zmtp_do_send_version_major) {
-        printf("zmtp_do_send_version_major");
+        PRINTF("zmtp_do_send_version_major");
 
     }else if(ev == zmtp_do_send_greeting) {
-        printf("zmtp_do_send_greeting");
+        PRINTF("zmtp_do_send_greeting");
 
     }else if(ev == zmtp_do_send_ready) {
-        printf("zmtp_do_send_ready");
+        PRINTF("zmtp_do_send_ready");
 
     }else if(ev == zmtp_call_me_again) {
-        printf("zmtp_call_me_again");
+        PRINTF("zmtp_call_me_again");
 
     }else if(ev == zmtp_process_event) {
-        printf("zmtp_process_event");
+        PRINTF("zmtp_process_event");
+
+    }else if(ev == zmq_socket_input_activity) {
+        PRINTF("zmq_socket_input_activity");
+
+    }else if(ev == zmq_socket_output_activity) {
+        PRINTF("zmq_socket_output_activity");
+
+    }else if(ev == PROCESS_EVENT_NONE) {
+        PRINTF("PROCESS_EVENT_NONE");
+
+    }else if(ev == PROCESS_EVENT_INIT) {
+        PRINTF("PROCESS_EVENT_INIT");
+
+    }else if(ev == PROCESS_EVENT_POLL) {
+        PRINTF("PROCESS_EVENT_POLL");
+
+    }else if(ev == PROCESS_EVENT_EXIT) {
+        PRINTF("PROCESS_EVENT_EXIT");
+
+    }else if(ev == PROCESS_EVENT_SERVICE_REMOVED) {
+        PRINTF("PROCESS_EVENT_SERVICE_REMOVED");
+
+    }else if(ev == PROCESS_EVENT_CONTINUE) {
+        PRINTF("PROCESS_EVENT_CONTINUE");
+
+    }else if(ev == PROCESS_EVENT_MSG) {
+        PRINTF("PROCESS_EVENT_MSG");
+
+    }else if(ev == PROCESS_EVENT_EXITED) {
+        PRINTF("PROCESS_EVENT_EXITED");
+
+    }else if(ev == PROCESS_EVENT_TIMER) {
+        PRINTF("PROCESS_EVENT_TIMER");
+
+    }else if(ev == PROCESS_EVENT_COM) {
+        PRINTF("PROCESS_EVENT_COM");
+
+    }else if(ev == PROCESS_EVENT_MAX) {
+        PRINTF("PROCESS_EVENT_MAX");
 
     }else{
-        printf("%d", ev);
+        PRINTF("%d", ev);
     }
 }
 
@@ -816,11 +853,13 @@ int zmtp_listen(zmtp_channel_t *chan, unsigned short port) {
 
 static int zmtp_tcp_input(struct tcp_socket *s, void *conn_ptr, const uint8_t *inputptr, int inputdatalen) {
   zmtp_connection_t *conn = (zmtp_connection_t *) conn_ptr;
-  printf("From ");
+  #if (DEBUG) & DEBUG_PRINT
+  PRINTF("From ");
   uip_debug_ipaddr_print(&(UIP_IP_BUF->srcipaddr));
-  printf(", received input %d bytes: ", inputdatalen);
+  PRINTF(", received input %d bytes: ", inputdatalen);
   print_data(inputptr, inputdatalen);
-  printf(" on connection %p\r\n", conn);
+  PRINTF(" on connection %p\r\n", conn);
+  #endif
 
   if((conn->validated & CONNECTION_VALIDATED) != CONNECTION_VALIDATED) {
       if(!(conn->validated & CONNECTION_VALIDATED_SIGNATURE)) {
@@ -831,37 +870,40 @@ static int zmtp_tcp_input(struct tcp_socket *s, void *conn_ptr, const uint8_t *i
               conn->validated |= CONNECTION_VALIDATED_SIGNATURE;
               zmtp_add_event(zmtp_do_send_version_major, conn);
               process_post(&zmtp_process, zmtp_process_event, conn);
-              printf("Validated signature\n");
+              PRINTF("Validated signature\n");
               return inputdatalen - 10;
           }else{
-              printf("WARNING: Remote sent bad signature\n");
+              printf("WARNING: Remote sent bad signature\r\n");
               uip_close();
               return 0;
           }
+
       }else if(!(conn->validated & CONNECTION_VALIDATED_VERSION)) {
           if((inputdatalen >= 1) && (inputptr[0] >= 3)) {
               conn->validated |= CONNECTION_VALIDATED_VERSION;
               zmtp_add_event(zmtp_do_send_greeting, conn);
               process_post(&zmtp_process, zmtp_process_event, conn);
-              printf("Validated version\n");
+              PRINTF("Validated version\n");
               return inputdatalen - 1;
           }else{
-              printf("WARNING: Remote sent unsupported/bad version\n");
+              printf("WARNING: Remote sent unsupported/bad version\r\n");
               uip_close();
               return 0;
           }
+
       }else if(!(conn->validated & CONNECTION_VALIDATED_GREETING)) {
           if(inputdatalen >= 53) {
               conn->validated |= CONNECTION_VALIDATED_GREETING;
-              printf("Validated greeting\n");
+              PRINTF("Validated greeting\n");
               zmtp_add_event(zmtp_do_send_ready, conn);
               process_post(&zmtp_process, zmtp_process_event, conn);
               return inputdatalen - 53;
           }else{
-              printf("WARNING: Remote sent bad greeting version\n");
+              printf("WARNING: Remote sent bad greeting version\r\n");
               uip_close();
               return 0;
           }
+
       }else if(!(conn->validated & CONNECTION_VALIDATED_READY)) {
           uint8_t size_offset;
           if(!(inputptr[0] & ZMQ_MSG_LARGE))
@@ -874,21 +916,19 @@ static int zmtp_tcp_input(struct tcp_socket *s, void *conn_ptr, const uint8_t *i
              (inputptr[1+size_offset] == 5) && // len('READY')
              (!strncmp((const char *) &inputptr[2+size_offset], "READY", 5))
             ) {
-              conn->validated |= CONNECTION_VALIDATED_READY;
-              printf("Validated ready\n");
 
               const uint8_t *pos = &inputptr[7 + size_offset];
               while(pos < (inputptr + inputdatalen)) {
                   uint8_t field_name_size = *pos++;
                   if((pos + field_name_size) > (inputptr + inputdatalen)) {
-                      printf("WARNING: Remote sent bad field name size\n");
+                      printf("WARNING: Remote sent bad field name size\r\n");
                       uip_close();
                       return 0;
                   }
                   const char *field_name = (const char *) pos;
                   pos += field_name_size;
                   if((pos + 4) > (inputptr + inputdatalen)) {
-                      printf("WARNING: Remote did not sent enought data for field name\n");
+                      printf("WARNING: Remote did not sent enought data for field name\r\n");
                       uip_close();
                       return 0;
                   }
@@ -896,7 +936,7 @@ static int zmtp_tcp_input(struct tcp_socket *s, void *conn_ptr, const uint8_t *i
                   uint32_t value_size = (pos[0] << 24) | (pos[1] << 16) | (pos[2] << 8) | pos[3];
                   pos += 4;
                   if((pos + value_size) > (inputptr + inputdatalen)) {
-                      printf("WARNING: Remote sent bad field value size\n");
+                      printf("WARNING: Remote sent bad field value size\r\n");
                       uip_close();
                       return 0;
                   }
@@ -909,33 +949,33 @@ static int zmtp_tcp_input(struct tcp_socket *s, void *conn_ptr, const uint8_t *i
                           if(!strncmp(field_value, "PUB", 3)) {
                               socket_type = ZMQ_PUB;
                               if((conn->channel->socket_type != ZMQ_SUB) && (conn->channel->socket_type != ZMQ_XSUB)) {
-                                  printf("WARNING: Can't connect something else than a SUB or XSUB to a PUB\n");
+                                  printf("WARNING: Can't connect something else than a SUB or XSUB to a PUB\r\n");
                                   uip_close();
                                   return 0;
                               }
                           }else if(!strncmp(field_value, "SUB", 3)) {
                               socket_type = ZMQ_SUB;
                               if((conn->channel->socket_type != ZMQ_PUB) && (conn->channel->socket_type != ZMQ_XPUB)) {
-                                  printf("WARNING: Can't connect something else than a PUB or XPUB to a SUB\n");
+                                  printf("WARNING: Can't connect something else than a PUB or XPUB to a SUB\r\n");
                                   uip_close();
                                   return 0;
                               }
                           }else if(!strncmp(field_value, "REQ", 3)) {
                               socket_type = ZMQ_REQ;
                               if((conn->channel->socket_type != ZMQ_REP) && (conn->channel->socket_type != ZMQ_ROUTER)) {
-                                  printf("WARNING: Can't connect something else than a REP or ROUTER to a REQ\n");
+                                  printf("WARNING: Can't connect something else than a REP or ROUTER to a REQ\r\n");
                                   uip_close();
                                   return 0;
                               }
                           }else if(!strncmp(field_value, "REP", 3)) {
                               socket_type = ZMQ_REP;
                               if((conn->channel->socket_type != ZMQ_REQ) && (conn->channel->socket_type != ZMQ_DEALER)) {
-                                  printf("WARNING: Can't connect something else than a REQ or DEALER to a REQ\n");
+                                  printf("WARNING: Can't connect something else than a REQ or DEALER to a REQ\r\n");
                                   uip_close();
                                   return 0;
                               }
                           }else{
-                              printf("WARNING: Remote sent bad socket type\n");
+                              printf("WARNING: Remote sent bad socket type\r\n");
                               uip_close();
                               return 0;
                           }
@@ -943,33 +983,33 @@ static int zmtp_tcp_input(struct tcp_socket *s, void *conn_ptr, const uint8_t *i
                           if(!strncmp(field_value, "PUSH", 4)) {
                               socket_type = ZMQ_PUSH;
                               if(conn->channel->socket_type != ZMQ_PULL) {
-                                  printf("WARNING: Can't connect something else than a PULL to a PUSH\n");
+                                  printf("WARNING: Can't connect something else than a PULL to a PUSH\r\n");
                                   uip_close();
                                   return 0;
                               }
                           }else if(!strncmp(field_value, "PULL", 4)) {
                               socket_type = ZMQ_PULL;
                               if(conn->channel->socket_type != ZMQ_PUSH) {
-                                  printf("WARNING: Can't connect something else than a PUSH to a PULL\n");
+                                  printf("WARNING: Can't connect something else than a PUSH to a PULL\r\n");
                                   uip_close();
                                   return 0;
                               }
                           }else if(!strncmp(field_value, "XPUB", 4)) {
                               socket_type = ZMQ_XPUB;
                               if((conn->channel->socket_type != ZMQ_SUB) && (conn->channel->socket_type != ZMQ_XSUB)) {
-                                  printf("WARNING: Can't connect something else than a SUB or XSUB to a XPUB\n");
+                                  printf("WARNING: Can't connect something else than a SUB or XSUB to a XPUB\r\n");
                                   uip_close();
                                   return 0;
                               }
                           }else if(!strncmp(field_value, "XSUB", 4)) {
                               socket_type = ZMQ_XSUB;
                               if((conn->channel->socket_type != ZMQ_PUB) && (conn->channel->socket_type != ZMQ_XPUB)) {
-                                  printf("WARNING: Can't connect something else than a PUB or XPUB to a XSUB\n");
+                                  printf("WARNING: Can't connect something else than a PUB or XPUB to a XSUB\r\n");
                                   uip_close();
                                   return 0;
                               }
                           }else{
-                              printf("WARNING: Remote sent bad socket type\n");
+                              printf("WARNING: Remote sent bad socket type\r\n");
                               uip_close();
                               return 0;
                           }
@@ -977,43 +1017,50 @@ static int zmtp_tcp_input(struct tcp_socket *s, void *conn_ptr, const uint8_t *i
                           if(!strncmp(field_value, "DEALER", 6)) {
                               socket_type = ZMQ_DEALER;
                               if((conn->channel->socket_type != ZMQ_REP) && (conn->channel->socket_type != ZMQ_DEALER) && (conn->channel->socket_type != ZMQ_ROUTER)) {
-                                  printf("WARNING: Can't connect something else than a REP, DEALER or ROUTER to a DEALER\n");
+                                  printf("WARNING: Can't connect something else than a REP, DEALER or ROUTER to a DEALER\r\n");
                                   uip_close();
                                   return 0;
                               }
                           }else if(!strncmp(field_value, "ROUTER", 6)) {
                               socket_type = ZMQ_ROUTER;
                               if((conn->channel->socket_type != ZMQ_REQ) && (conn->channel->socket_type != ZMQ_DEALER) && (conn->channel->socket_type != ZMQ_ROUTER)) {
-                                  printf("WARNING: Can't connect something else than a REQ, DEALER or ROUTER to a ROUTER\n");
+                                  printf("WARNING: Can't connect something else than a REQ, DEALER or ROUTER to a ROUTER\r\n");
                                   uip_close();
                                   return 0;
                               }
                           }else{
-                              printf("WARNING: Remote sent bad socket type\n");
+                              printf("WARNING: Remote sent bad socket type\r\n");
                               uip_close();
                               return 0;
                           }
                       }else{
-                          printf("WARNING: Remote sent bad socket type\n");
+                          printf("WARNING: Remote sent bad socket type\r\n");
                           uip_close();
                           return 0;
                       }
-                      printf("Got socket type %d\n", socket_type);
+                      PRINTF("Got socket type %d\n", socket_type);
                   }else if((field_name_size == 8) && !strncasecmp(field_name, "Identity", 8)) {
                       char buf[128];
                       strncpy(buf, field_value, value_size);
                       buf[value_size] = 0;
-                      printf("Got Identity %s\n", buf);
+                      PRINTF("Got Identity %s\n", buf);
                   }
               }
+
+              conn->validated |= CONNECTION_VALIDATED_READY;
+              PRINTF("Validated ready\n");
+
+              process_poll(conn->channel->notify_process_input);
+              if(conn->channel->notify_process_input != conn->channel->notify_process_output)
+                  process_poll(conn->channel->notify_process_output);
           }else{
-              printf("WARNING: Remote sent bad ready\n");
+              printf("WARNING: Remote sent bad ready\r\n");
               uip_close();
               return 0;
           }
       }
   }else{
-      printf("Connection is validated\n");
+      PRINTF("Connection is validated\n");
       int read = 0;
       const uint8_t *pos = inputptr;
       while(pos < (inputptr + inputdatalen)) {
@@ -1023,9 +1070,9 @@ static int zmtp_tcp_input(struct tcp_socket *s, void *conn_ptr, const uint8_t *i
               return 0;
           }
           pos += read;
-          printf("Read a message from wire\n");
+          PRINTF("Read a message from wire\n");
           zmtp_connection_add_in_msg(conn, msg);
-          process_post(conn->channel->notify_process, zmq_socket_input_activity, NULL);
+          process_post(conn->channel->notify_process_input, zmq_socket_input_activity, NULL);
       }
   }
 
@@ -1034,10 +1081,10 @@ static int zmtp_tcp_input(struct tcp_socket *s, void *conn_ptr, const uint8_t *i
 
 static void zmtp_tcp_event(struct tcp_socket *s, void *conn_ptr, tcp_socket_event_t ev) {
   zmtp_connection_t *conn = (zmtp_connection_t *) conn_ptr;
-  // printf("EV > %p\n", conn);
+  // PRINTF("EV > %p\n", conn);
   switch(ev) {
     case TCP_SOCKET_CONNECTED:
-        printf("event TCP_SOCKET_CONNECTED for ");
+        PRINTF("event TCP_SOCKET_CONNECTED for ");
 
         if(conn->addr == NULL) // Was a listen, need to create a new connection for other clients
             zmtp_listen(conn->channel, conn->port);
@@ -1047,30 +1094,32 @@ static void zmtp_tcp_event(struct tcp_socket *s, void *conn_ptr, tcp_socket_even
         // process_post(&zmtp_process, zmtp_do_remote_connected, conn);
         break;
     case TCP_SOCKET_CLOSED:
-        printf("event TCP_SOCKET_CLOSED for ");
+        PRINTF("event TCP_SOCKET_CLOSED for ");
         if(conn->addr == NULL)
             zmtp_channel_close_conn(conn->channel, conn);
         break;
     case TCP_SOCKET_TIMEDOUT:
-        printf("event TCP_SOCKET_TIMEDOUT for ");
+        PRINTF("event TCP_SOCKET_TIMEDOUT for ");
         if(conn->addr == NULL)
             zmtp_channel_close_conn(conn->channel, conn);
         break;
     case TCP_SOCKET_ABORTED:
-        printf("event TCP_SOCKET_ABORTED for ");
+        PRINTF("event TCP_SOCKET_ABORTED for ");
         if(conn->addr == NULL)
             zmtp_channel_close_conn(conn->channel, conn);
         break;
     case TCP_SOCKET_DATA_SENT:
-        printf("event TCP_SOCKET_DATA_SENT for ");
+        PRINTF("event TCP_SOCKET_DATA_SENT for ");
         conn->sent_done = 1;
         process_post(&zmtp_process, zmtp_call_me_again, conn);
         break;
     default:
-        printf("event %d for ", ev);
+        PRINTF("event %d for ", ev);
   }
+  #if (DEBUG) & DEBUG_PRINT
   uip_debug_ipaddr_print(&(UIP_IP_BUF->srcipaddr));
-  printf("\r\n");
+  PRINTF("\r\n");
+  #endif
 }
 
 /*---------------------------------------------------------------------------*/
@@ -1285,19 +1334,19 @@ PROCESS_THREAD(zmtp_process, ev, data)
       if(ev == zmtp_process_event) {
           if(zmtp_pop_event(&ev, &data) != 0)
               continue;
-          printf(">> Event is now ");
+          PRINTF(">> Event is now ");
           print_event_name(ev);
-          printf(" %p\n", data);
+          PRINTF(" %p\n", data);
       }
 
       if(ev == zmtp_do_listen) {
           zmtp_connection_tcp_listen(data);
 
       }else if(ev == zmtp_do_remote_connected) {
-          printf("Do remote connect\n");
+          PRINTF("Do remote connect\n");
           process_post(&zmtp_process, zmtp_call_me_again, data);
           PROCESS_WAIT_THREAD(zmtp_remote_connected(data), zmtp_do_remote_connected);
-          printf("Connect done\n");
+          PRINTF("Connect done\n");
 
       }else if(ev == zmtp_do_send_version_major) {
         process_post(&zmtp_process, zmtp_call_me_again, data);
@@ -1319,7 +1368,7 @@ PROCESS_THREAD(zmtp_process, ev, data)
 
         process_post(&zmtp_process, zmtp_call_me_again, data);
         PROCESS_WAIT_THREAD(zmtp_send_msg(data, msg), zmq_socket_output_activity);
-        process_post(((zmtp_connection_t *) data)->channel->notify_process, zmq_socket_output_activity, NULL);
+        process_post(((zmtp_connection_t *) data)->channel->notify_process_output, zmq_socket_output_activity, NULL);
 
       }
   }

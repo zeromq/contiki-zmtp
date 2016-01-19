@@ -10,7 +10,7 @@ killall() {
     echo DONE
 }
 
-./my-zmq-router.minimal-net &
+./my-zmq-sub.minimal-net &
 sleep 1
 ip -6 address add fdfd::1/64 dev tap0
 

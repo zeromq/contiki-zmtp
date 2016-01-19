@@ -2,16 +2,14 @@
 
 #include <stdio.h>
 
-#define LOCAL_PT(pt_) static struct pt pt_; static uint8_t pt_inited=0; if(pt_inited == 0) { PT_INIT(&pt_); pt_inited = 1; }
+#include "net/ip/uip-debug.h"
 
 
 void zmq_router_init(zmq_socket_t *self) {
     self->in_conn = NULL;
     self->out_conn = NULL;
 
-    self->connect = zmq_router_connect;
     // self->signal = zmq_router_signal;
-    self->bind = zmq_router_bind;
     self->recv = zmq_router_recv;
     self->recv_multipart = zmq_router_recv_multipart;
     self->send = zmq_router_send;
@@ -27,19 +25,10 @@ void zmq_router_init(zmq_socket_t *self) {
     }
 }*/
 
-int zmq_router_connect (zmq_socket_t *self, uip_ipaddr_t *addr, unsigned short port) {
-    // TODO: implement
-    return -1;
-}
-
-int zmq_router_bind (zmq_socket_t *self, unsigned short port) {
-    return zmtp_listen(&self->channel, port);
-}
-
 PT_THREAD(zmq_router_recv(zmq_socket_t *self, zmq_msg_t **msg_ptr)) {
     // TODO: redo this function
     LOCAL_PT(pt);
-    // printf("> zmq_router_recv %d\n", pt.lc);
+    // PRINTF("> zmq_router_recv %d\n", pt.lc);
     PT_BEGIN(&pt);
 
     if(self->in_conn == NULL)
@@ -82,7 +71,7 @@ PT_THREAD(zmq_router_recv(zmq_socket_t *self, zmq_msg_t **msg_ptr)) {
 
 PT_THREAD(zmq_router_recv_multipart(zmq_socket_t *self, list_t msg_list)) {
     LOCAL_PT(pt);
-    // printf("> zmq_router_recv_multipart %d\n", pt.lc);
+    // PRINTF("> zmq_router_recv_multipart %d\n", pt.lc);
     PT_BEGIN(&pt);
 
     zmq_msg_t *msg;
@@ -94,7 +83,6 @@ PT_THREAD(zmq_router_recv_multipart(zmq_socket_t *self, list_t msg_list)) {
     PT_END(&pt);
 }
 
-// Take ownership of the message and will destroy it
 PT_THREAD(zmq_router_send(zmq_socket_t *self, zmq_msg_t *msg_ptr)) {
     static zmtp_connection_t *conn;
     // TODO: implement HWM
