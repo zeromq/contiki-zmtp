@@ -23,8 +23,9 @@ Limitations:
   consider it as an error and thus will close the connection
 - Same for output data bigger than ZMTP_OUTPUT_BUFFER_SIZE (default: 200), it will have an undefined behaviour
 - There is nothing to close/stop a socket
-- Only one PUB socket at a time
-- SUB sockets can only subscribe (but PUB do support unsubcriptions)
+- Can only bind, but connecting should not be hard to implement (just need to parse address strings)
+- Only one PUB socket can be created
+- SUB sockets can only subscribe (but PUB do support unsubcriptions), but subscriptions will only be sent once to currenlty connected peer
 */
 
 #ifndef ZMQ_MAX_MSGS
@@ -131,7 +132,6 @@ struct zmq_socket {
     zmtp_channel_t channel;
     zmtp_connection_t *in_conn;
     zmtp_connection_t *out_conn;
-    // void (*signal) (struct zmq_socket *self, zmtp_channel_signal_t signal);
     PT_THREAD((*recv) (struct zmq_socket *self, zmq_msg_t **msg_ptr));
     PT_THREAD((*recv_multipart) (struct zmq_socket *self, list_t msg_list));
     PT_THREAD((*send) (struct zmq_socket *self, zmq_msg_t *msg_ptr));

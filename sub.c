@@ -38,7 +38,7 @@ PT_THREAD(zmq_sub_subscribe(zmq_socket_t *self, const char *topic)) {
 static PT_THREAD(zmq_sub_send_all(zmq_socket_t *self, zmq_msg_t *msg)) {
     // TODO: implement HWM
     LOCAL_PT(pt);
-    PRINTF("> zmq_sub_send_all %d %p\n", pt.lc, msg);
+    PRINTF("> zmq_sub_send_all %d %p\r\n", pt.lc, msg);
     PT_BEGIN(&pt);
 
     self->out_conn = list_head(self->channel.connections);

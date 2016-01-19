@@ -16,7 +16,6 @@ void zmq_pub_init(zmq_socket_t *self) {
     self->recv = NULL;
     self->recv_multipart = NULL;
     self->send = zmq_pub_send;
-    // self->send = zmq_socket_send_round_robin_block;
 
     process_start(&zmq_pub_subscription_receiver, self);
 }
@@ -76,7 +75,7 @@ uint8_t match_subscriptions(zmtp_connection_t *conn, zmq_msg_t *msg) {
 }
 
 PROCESS_THREAD(zmq_pub_subscription_receiver, ev, data) {
-    PRINTF("> zmq_pub_subscription_receiver %d, %d, %p\n", process_pt->lc, ev, data);
+    PRINTF("> zmq_pub_subscription_receiver %d, %d, %p\r\n", process_pt->lc, ev, data);
     PROCESS_BEGIN();
 
     // These static variables are what limits PUB socket to only one
@@ -121,7 +120,7 @@ PROCESS_THREAD(zmq_pub_subscription_receiver, ev, data) {
 PT_THREAD(zmq_pub_send(zmq_socket_t *self, zmq_msg_t *msg)) {
     // TODO: implement HWM
     LOCAL_PT(pt);
-    PRINTF("> zmq_pub_send %d %p\n", pt.lc, msg);
+    PRINTF("> zmq_pub_send %d %p\r\n", pt.lc, msg);
     PT_BEGIN(&pt);
 
     self->out_conn = list_head(self->channel.connections);

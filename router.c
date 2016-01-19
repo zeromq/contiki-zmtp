@@ -9,24 +9,14 @@ void zmq_router_init(zmq_socket_t *self) {
     self->in_conn = NULL;
     self->out_conn = NULL;
 
-    // self->signal = zmq_router_signal;
     self->recv = zmq_router_recv;
     self->recv_multipart = zmq_router_recv_multipart;
     self->send = zmq_router_send;
 }
 
-/*void zmq_router_signal(zmq_socket_t *self, zmtp_channel_signal_t signal) {
-    switch(signal) {
-      case ZMTP_PEER_DISCONNECT:
-
-        break;
-      default:
-        break;
-    }
-}*/
-
 PT_THREAD(zmq_router_recv(zmq_socket_t *self, zmq_msg_t **msg_ptr)) {
     // TODO: redo this function
+    // TODO: implement identity
     LOCAL_PT(pt);
     // PRINTF("> zmq_router_recv %d\n", pt.lc);
     PT_BEGIN(&pt);
@@ -89,7 +79,7 @@ PT_THREAD(zmq_router_send(zmq_socket_t *self, zmq_msg_t *msg_ptr)) {
     LOCAL_PT(pt);
     PT_BEGIN(&pt);
 
-    // TODO: deal with identity instead
+    // TODO: deal with identity instead of taking the first connection
     conn = list_head(self->channel.connections);
     zmtp_connection_add_out_msg(conn, msg_ptr);
     zmtp_process_post(zmq_socket_output_activity, conn);

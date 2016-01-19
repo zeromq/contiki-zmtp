@@ -4,7 +4,6 @@ ctx = zmq.Context()
 s = ctx.socket(zmq.ROUTER)
 s.setsockopt(zmq.IPV6, 1)
 
-#s.bind('tcp://*:9999')
 s.connect('tcp://fdfd::ff:fe00:10:9999')
 
 while(True):

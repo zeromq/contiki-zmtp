@@ -23,12 +23,6 @@ PROCESS_THREAD(test_dealer_bind, ev, data) {
 
     while(1) {
         PROCESS_PAUSE();
-        // zmq_msg_t *msg = NULL;
-        // PT_WAIT_THREAD(process_pt, my_sock.recv(&my_sock, &msg));
-        // if(msg == NULL) {
-        //     printf("Error reading from socket\r\n");
-        //     continue;
-        // }
 
         static zmq_msg_t *msg = NULL;
         msg = zmq_msg_from_const_data(0, "Hi there!", 9);

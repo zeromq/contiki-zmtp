@@ -16,7 +16,7 @@ LIST(read_list);
 PROCESS_THREAD(test_sub_bind, ev, data) {
     // printf("> test_sub_bind %d, %d, %p\n", process_pt->lc, ev, data);
     // print_event_name(ev);
-    // printf("\n");
+    // printf("\r\n");
     PROCESS_BEGIN();
 
     list_init(read_list);
@@ -30,7 +30,7 @@ PROCESS_THREAD(test_sub_bind, ev, data) {
     // This is actually a defect of the exemple (and of the subscribe implementation)
     // because the subscribe message will only be sent to the first publisher connected.
 
-    printf("Doing subscription\n");
+    printf("Doing subscription\r\n");
     PT_WAIT_THREAD(process_pt, zmq_sub_subscribe(&my_sock, "Hi"));
 
     while(1) {

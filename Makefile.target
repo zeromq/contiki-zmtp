@@ -1,4 +1,0 @@
-TARGET = minimal-net
-
-CONTIKI_WITH_RPL = 0
-CFLAGS += -DHARD_CODED_ADDRESS=\"fdfd::10\"

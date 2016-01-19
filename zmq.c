@@ -65,7 +65,7 @@ void zmq_socket_init(zmq_socket_t *self, zmq_socket_type_t socket_type) {
 PT_THREAD(zmq_socket_recv_fair_queue(zmq_socket_t *self, zmq_msg_t **msg_ptr)) {
     // TODO: redo this function
     LOCAL_PT(pt);
-    // PRINTF("> zmq_socket_recv_fair_queue %d\n", pt.lc);
+    // PRINTF("> zmq_socket_recv_fair_queue %d\r\n", pt.lc);
     PT_BEGIN(&pt);
 
     if(self->in_conn == NULL)
@@ -113,7 +113,7 @@ PT_THREAD(zmq_socket_recv_fair_queue(zmq_socket_t *self, zmq_msg_t **msg_ptr)) {
 
 PT_THREAD(zmq_socket_recv_multipart_fair_queue(zmq_socket_t *self, list_t msg_list)) {
     LOCAL_PT(pt);
-    // PRINTF("> zmq_socket_recv_multipart_fair_queue %d\n", pt.lc);
+    // PRINTF("> zmq_socket_recv_multipart_fair_queue %d\r\n", pt.lc);
     PT_BEGIN(&pt);
 
     zmq_msg_t *msg;
@@ -129,7 +129,7 @@ PT_THREAD(zmq_socket_recv_multipart_fair_queue(zmq_socket_t *self, list_t msg_li
 PT_THREAD(zmq_socket_send_round_robin_block(zmq_socket_t *self, zmq_msg_t *msg)) {
     // TODO: implement HWM
     LOCAL_PT(pt);
-    PRINTF("> zmq_socket_send_round_robin_block %d %p\n", pt.lc, msg);
+    PRINTF("> zmq_socket_send_round_robin_block %d %p\r\n", pt.lc, msg);
     PT_BEGIN(&pt);
 
     if(self->out_conn == NULL)

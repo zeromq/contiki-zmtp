@@ -14,7 +14,7 @@ struct etimer et;
 PROCESS_THREAD(test_pub_bind, ev, data) {
     // printf("> test_pub_bind %d, %d, %p\n", process_pt->lc, ev, data);
     // print_event_name(ev);
-    // printf("\n");
+    // printf("\r\n");
     PROCESS_BEGIN();
 
     zmq_init();
