@@ -1,7 +1,9 @@
-ZeroMQ for Contiki OS
-=====================
+ZMTP for Contiki OS
+===================
 
-This is a partial port of [ZeroMQ](http://zeromq.org/) for [Contiki OS](http://www.contiki-os.org/).
+This is a partial port of the ZeroMQ Message Transfer Protocol [ZMTP](http://zeromq.org/) for [Contiki OS](http://www.contiki-os.org/). It is based on the [libzmtp](https://github.com/zeromq/libzmtp), tiny ZMTP library in C.
+
+Typical target is an ARM Cortext M3 running at 32MHz, with 512KB of flash, and 80KB of RAM. And with a sub-1GHz RF link. The implementation makes use of Contiki network stack, which can use TCP, IPv4, IPv6 and 6LoWPAN. The demo program is about 130KB and runs over 6LoWPAN on the sub-GHz link.
 
 Supported features
 ------------------
@@ -17,7 +19,6 @@ Limitations
 
 It was not possible to implement every thing according to the RFCs. Here is a list of known limitations.
 
-- Router/Dealer does not yet support custom identity
 - Due to Contiki's protothread, it blocks processing of incoming data and other outgoing data when sending to a peer
 - Due to Contiki's protothread, router blocks on sending (at least for a part of the sending process)
 - Due to Contiki's protothread and the necessity to use static variables in functions to keep the state of a function's local variables, creating several sockets of the same type and reading/sending from them at the same time can potentially lead to undefined behaviours.
@@ -135,7 +136,6 @@ After waiting a couple of seconds (yes, it is a bit slugish) you should see what
 TODO
 ----
 
-* Make use of identities for ROUTER/DEALER sockets
 * Implement runtime configurable in/out queues (ie. High Water Mark)
 * Make it able to deal with very large packets (ie. bigger than one input or output TCP buffers)
 * Automated tests!
