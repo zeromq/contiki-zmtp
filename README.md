@@ -141,7 +141,7 @@ TODO
 * Automated tests!
 * Fix all known limitations mentioned above
 
-License
--------
+License and contribution policy
+-------------------------------
 
-MPLv2
+This project is licensed under the terms of the MPLv2. It follows the contribution policy of [C4.1](http://rfc.zeromq.org/spec:22).
