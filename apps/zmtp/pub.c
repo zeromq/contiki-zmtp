@@ -114,9 +114,7 @@ PROCESS_THREAD(zmq_pub_subscription_receiver, ev, data) {
             self->in_conn = list_item_next(self->in_conn);
         }
 
-        PROCESS_WAIT_EVENT();
-        if(data != NULL)
-            self = data;
+        PROCESS_WAIT_EVENT_UNTIL(ev == zmq_socket_input_activity);
 
         self->in_conn = list_head(self->channel.connections);
         msg = NULL;
