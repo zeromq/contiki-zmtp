@@ -1,0 +1,1 @@
+zmtp_src = zmq.c zmtp.c router.c dealer.c push.c pull.c pub.c sub.c
