@@ -44,8 +44,8 @@ Trying it on a local host (Linux)
 ---------------------------------
 
 ```
-$ git clone --recursive https://github.com/Alidron/contiki-zeromq.git
-$ cd contiki-zeromq
+$ git clone --recursive https://github.com/zeromq/contiki-zmtp
+$ cd contiki-zmtp/examples/zmtp
 $ make TARGET=minimal-net
 $ sudo ./start-pub.sh
 ```
@@ -58,7 +58,6 @@ The "remote" host is accessible at the address fdfd::ff:fe00:10 (hardcoded in th
 
 The PUB socket listen on port 9999. You can try a simple Python script to subscribe to what the publisher says (you need pyzmq installed):
 ```
-$ cd _test
 $ python zmq_sub.py
 ```
 
@@ -75,7 +74,7 @@ The MCU is an ARM Cortext M3 STM32L152RE, 32MHz, 512KB of Flash and 80KB of RAM.
 
 This part is described in this [Getting started guide (UM2000)](http://www.st.com/st-web-ui/static/active/en/resource/technical/document/user_manual/DM00255309.pdf) from ST. The important parts are reproduced here:
 ```
-$ cd contiki/examples/ipv6/rpl-border-router
+$ cd ../../contiki/examples/ipv6/rpl-border-router
 $ make TARGET=stm32nucleo-spirit1
 $ arm-none-eabi-objcopy -O binary border-router.stm32nucleo-spirit1 br.bin
 ```
@@ -94,7 +93,7 @@ Note the first address (starting with 'aaaa') in the output of tunslip6. Eg. `aa
 ### 2. Setup the publisher example program
 
 ```
-$ cd ../.. # Back to this repo root
+$ cd ../../examples/zmtp
 $ make TARGET=stm32nucleo-spirit1
 $ arm-none-eabi-objcopy -O binary my-zmq-pub.stm32nucleo-spirit1 my-zmq-pub.bin
 ```
@@ -127,7 +126,6 @@ s.connect('tcp://aaaa::a00:f7ff:b9bc:4643:9999')
 
 Now run this Python script:
 ```
-$ cd _test
 $ python zmq_sub.py
 ```
 
@@ -139,6 +137,7 @@ TODO
 * Implement runtime configurable in/out queues (ie. High Water Mark)
 * Make it able to deal with very large packets (ie. bigger than one input or output TCP buffers)
 * Automated tests!
+* Stabilise API and document
 * Fix all known limitations mentioned above
 
 License and contribution policy
