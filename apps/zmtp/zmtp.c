@@ -767,7 +767,8 @@ static int zmtp_tcp_input(struct tcp_socket *s, void *conn_ptr, const uint8_t *i
           pos += read;
           PRINTF("Read a message from wire\r\n");
           zmtp_connection_add_in_msg(conn, msg);
-          process_post(conn->channel->notify_process_input, zmq_socket_input_activity, NULL);
+          if(!(zmq_msg_flags(msg) & ZMQ_MSG_MORE))
+              process_post(conn->channel->notify_process_input, zmq_socket_input_activity, NULL);
       }
   }
 
