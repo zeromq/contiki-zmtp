@@ -89,31 +89,33 @@ PT_THREAD(zmq_socket_recv_fair_queue(zmq_socket_t *self, zmq_msg_t **msg_ptr)) {
 
     zmq_msg_t *msg = NULL;
     while(1) {
+        zmtp_connection_t *first_evaluated = self->in_conn;
+
         while(self->in_conn != NULL) {
-            if((self->in_conn->validated & CONNECTION_VALIDATED) != CONNECTION_VALIDATED) {
-                self->in_conn = list_item_next(self->in_conn);
-                continue;
+            if((self->in_conn->validated & CONNECTION_VALIDATED) == CONNECTION_VALIDATED) {
+                msg = zmtp_connection_pop_in_msg(self->in_conn);
+                if(msg != NULL) {
+                    *msg_ptr = msg;
+                    if((zmq_msg_flags(msg) & ZMQ_MSG_MORE) != ZMQ_MSG_MORE)
+                        self->in_conn = list_item_next(self->in_conn);
+                    break;
+                }
             }
 
-            msg = zmtp_connection_pop_in_msg(self->in_conn);
-            if(msg != NULL) {
-                *msg_ptr = msg;
-                if((zmq_msg_flags(msg) & ZMQ_MSG_MORE) != ZMQ_MSG_MORE)
-                    self->in_conn = list_item_next(self->in_conn);
-                break;
-            }
             self->in_conn = list_item_next(self->in_conn);
+
+            if(self->in_conn == NULL)
+                self->in_conn = list_head(self->channel.connections);
+                
+            if(self->in_conn == first_evaluated)
+                break;
         }
 
         if(msg != NULL)
             break;
 
-        if(self->in_conn == NULL) {
-            PT_YIELD(&pt);
-            self->in_conn = list_head(self->channel.connections);
-            msg = NULL;
-            continue;
-        }
+        PT_YIELD(&pt);
+        msg = NULL;
     }
 
     PT_END(&pt);
