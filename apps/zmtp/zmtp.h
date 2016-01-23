@@ -32,6 +32,7 @@ int zmtp_connection_tcp_connect (zmtp_connection_t *self);
 int zmtp_connection_tcp_listen (zmtp_connection_t *self);
 
 void zmtp_init();
+int zmtp_connect(zmtp_channel_t *chan, const char *host, unsigned short port);
 int zmtp_listen(zmtp_channel_t *chan, unsigned short port);
 
 zmtp_channel_t *zmtp_channel_new (zmq_socket_type_t socket_type, struct process *in_p, struct process *out_p);
