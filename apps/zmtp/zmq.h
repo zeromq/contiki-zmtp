@@ -83,7 +83,8 @@ struct zmtp_connection {
     uint8_t inputbuf[ZMTP_INPUT_BUFFER_SIZE];
     uint8_t outputbuf[ZMTP_OUTPUT_BUFFER_SIZE];
     struct tcp_socket socket;
-    uip_ipaddr_t *addr;
+    uip_ipaddr_t addr;
+    uip_ipaddr_t *addr_ptr;
     uint16_t port;
 
     uint8_t sent_done; // Used to block zmtp_tcp_send_inner
@@ -138,8 +139,8 @@ typedef enum {
 
 struct zmq_socket {
     zmtp_channel_t channel;
-    zmtp_connection_t *in_conn;
-    zmtp_connection_t *out_conn;
+    zmtp_connection_t *in_conn; // Current connection being used for input
+    zmtp_connection_t *out_conn; // Current connection being used for output
     PT_THREAD((*recv) (struct zmq_socket *self, zmq_msg_t **msg_ptr));
     PT_THREAD((*recv_multipart) (struct zmq_socket *self, list_t msg_list));
     PT_THREAD((*send) (struct zmq_socket *self, zmq_msg_t *msg_ptr));
@@ -150,7 +151,7 @@ process_event_t zmq_socket_input_activity;
 process_event_t zmq_socket_output_activity;
 
 void zmq_init();
-int zmq_connect (zmq_socket_t *self, uip_ipaddr_t *addr, unsigned short port);
+int zmq_connect(zmq_socket_t *self, const char *host, unsigned short port);
 int zmq_bind (zmq_socket_t *self, unsigned short port);
 
 void zmq_socket_init(zmq_socket_t *self, zmq_socket_type_t socket_type);

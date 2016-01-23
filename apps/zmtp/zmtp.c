@@ -85,6 +85,8 @@ void zmtp_connection_init(zmtp_connection_t *self) {
     LIST_STRUCT_INIT(self, out_queue);
     LIST_STRUCT_INIT(self, sub_topics);
 
+    self->addr_ptr = NULL;
+
     tcp_socket_register(
         &self->socket,
         self,
@@ -95,7 +97,7 @@ void zmtp_connection_init(zmtp_connection_t *self) {
 }
 
 int zmtp_connection_tcp_connect (zmtp_connection_t *self) {
-    return tcp_socket_connect(&self->socket, self->addr, self->port);
+    return tcp_socket_connect(&self->socket, self->addr_ptr, self->port);
 }
 
 int zmtp_connection_tcp_listen (zmtp_connection_t *self) {
@@ -396,6 +398,7 @@ PT_THREAD(zmtp_tcp_send_inner (zmtp_connection_t *conn, const uint8_t *data, siz
 /*---------------------------------------------------*/
 
 static process_event_t zmtp_do_listen;
+static process_event_t zmtp_do_connect;
 static process_event_t zmtp_do_remote_connected;
 static process_event_t zmtp_do_send_version_major;
 static process_event_t zmtp_do_send_greeting;
@@ -424,6 +427,7 @@ void zmtp_init() {
         memb_init(&zmtp_event_bank);
 
         zmtp_do_listen = process_alloc_event();
+        zmtp_do_connect = process_alloc_event();
         zmtp_do_remote_connected = process_alloc_event();
         zmtp_do_send_version_major = process_alloc_event();
         zmtp_do_send_greeting = process_alloc_event();
@@ -469,6 +473,9 @@ int zmtp_pop_event(process_event_t *ev, void **data) {
 void print_event_name(process_event_t ev) {
     if(ev == zmtp_do_listen) {
         PRINTF("zmtp_do_listen");
+
+    }else if(ev == zmtp_do_connect) {
+        PRINTF("zmtp_do_connect");
 
     }else if(ev == zmtp_do_remote_connected) {
         PRINTF("zmtp_do_remote_connected");
@@ -532,6 +539,21 @@ void print_event_name(process_event_t ev) {
     }
 }
 
+int zmtp_connect(zmtp_channel_t *chan, const char *host, unsigned short port) {
+    zmtp_connection_t *conn = zmtp_channel_add_conn(chan);
+    if(conn == NULL)
+        return -1;
+
+    conn->addr_ptr = &conn->addr;
+    uiplib_ip6addrconv(host, conn->addr_ptr);
+    conn->port = port;
+
+    zmtp_add_event(zmtp_do_connect, conn);
+    process_post(&zmtp_process, zmtp_process_event, conn);
+
+    return 0;
+}
+
 int zmtp_listen(zmtp_channel_t *chan, unsigned short port) {
     zmtp_connection_t *conn = zmtp_channel_add_conn(chan);
     if(conn == NULL)
@@ -555,6 +577,9 @@ static int zmtp_tcp_input(struct tcp_socket *s, void *conn_ptr, const uint8_t *i
   print_data(inputptr, inputdatalen);
   PRINTF(" on connection %p\r\n", conn);
   #endif
+
+  if(inputdatalen == 0) // Happens during connect
+      return 0;
 
   if((conn->validated & CONNECTION_VALIDATED) != CONNECTION_VALIDATED) {
       if(!(conn->validated & CONNECTION_VALIDATED_SIGNATURE)) {
@@ -782,7 +807,7 @@ static void zmtp_tcp_event(struct tcp_socket *s, void *conn_ptr, tcp_socket_even
     case TCP_SOCKET_CONNECTED:
         PRINTF("event TCP_SOCKET_CONNECTED for ");
 
-        if(conn->addr == NULL) // Was a listen, need to create a new connection for other clients
+        if(conn->addr_ptr == NULL) // Was a listen, need to create a new connection for other clients
             zmtp_listen(conn->channel, conn->port);
 
         zmtp_add_event(zmtp_do_remote_connected, conn);
@@ -790,17 +815,17 @@ static void zmtp_tcp_event(struct tcp_socket *s, void *conn_ptr, tcp_socket_even
         break;
     case TCP_SOCKET_CLOSED:
         PRINTF("event TCP_SOCKET_CLOSED for ");
-        if(conn->addr == NULL)
+        if(conn->addr_ptr == NULL)
             zmtp_channel_close_conn(conn->channel, conn);
         break;
     case TCP_SOCKET_TIMEDOUT:
         PRINTF("event TCP_SOCKET_TIMEDOUT for ");
-        if(conn->addr == NULL)
+        if(conn->addr_ptr == NULL)
             zmtp_channel_close_conn(conn->channel, conn);
         break;
     case TCP_SOCKET_ABORTED:
         PRINTF("event TCP_SOCKET_ABORTED for ");
-        if(conn->addr == NULL)
+        if(conn->addr_ptr == NULL)
             zmtp_channel_close_conn(conn->channel, conn);
         break;
     case TCP_SOCKET_DATA_SENT:
@@ -850,6 +875,9 @@ PROCESS_THREAD(zmtp_process, ev, data)
 
       if(ev == zmtp_do_listen) {
           zmtp_connection_tcp_listen(data);
+
+      }else if(ev == zmtp_do_connect) {
+          zmtp_connection_tcp_connect(data);
 
       }else if(ev == zmtp_do_remote_connected) {
           PRINTF("Do remote connect\r\n");
