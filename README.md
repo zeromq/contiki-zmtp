@@ -29,7 +29,6 @@ It was not possible to implement every thing according to the RFCs. Here is a li
   consider it as an error and thus will close the connection
 - Same for output data bigger than ZMTP_OUTPUT_BUFFER_SIZE (default: 200), it will have an undefined behaviour
 - There is nothing to close/stop a socket
-- Can only bind, but connecting should not be hard to implement (just need to parse address strings)
 - Only one PUB socket can be created
 - SUB sockets can only subscribe (but PUB do support unsubcriptions), but subscriptions will only be sent once to currently connected peer
 
