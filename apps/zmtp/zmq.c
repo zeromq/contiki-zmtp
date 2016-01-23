@@ -32,9 +32,8 @@ void zmq_init() {
     }
 }
 
-int zmq_connect (zmq_socket_t *self, uip_ipaddr_t *addr, unsigned short port) {
-    // TODO: implement
-    return -1;
+int zmq_connect(zmq_socket_t *self, const char *host, unsigned short port) {
+    return zmtp_connect(&self->channel, host, port);
 }
 
 int zmq_bind (zmq_socket_t *self, unsigned short port) {
