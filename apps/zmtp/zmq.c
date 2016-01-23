@@ -69,6 +69,15 @@ void zmq_socket_init(zmq_socket_t *self, zmq_socket_type_t socket_type) {
     }
 }
 
+void *list_wrap_around(void *list, void *current, void *stop) {
+    current = list_item_next(current);
+    if(current == NULL)
+        current = list_head(list);
+    if(current == stop)
+        return NULL;
+    return current;
+}
+
 PT_THREAD(zmq_socket_recv_fair_queue(zmq_socket_t *self, zmq_msg_t **msg_ptr)) {
     // TODO: redo this function
     LOCAL_PT(pt);
@@ -105,7 +114,7 @@ PT_THREAD(zmq_socket_recv_fair_queue(zmq_socket_t *self, zmq_msg_t **msg_ptr)) {
 
             if(self->in_conn == NULL)
                 self->in_conn = list_head(self->channel.connections);
-                
+
             if(self->in_conn == first_evaluated)
                 break;
         }
@@ -134,7 +143,6 @@ PT_THREAD(zmq_socket_recv_multipart_fair_queue(zmq_socket_t *self, list_t msg_li
     PT_END(&pt);
 }
 
-// Take ownership of the message and will destroy it
 PT_THREAD(zmq_socket_send_round_robin_block(zmq_socket_t *self, zmq_msg_t *msg)) {
     // TODO: implement HWM
     LOCAL_PT(pt);
@@ -146,12 +154,16 @@ PT_THREAD(zmq_socket_send_round_robin_block(zmq_socket_t *self, zmq_msg_t *msg))
 
     while(1) {
         // TODO: check if queue is full (HWM)
+        zmtp_connection_t *stop = self->out_conn;
+
         while((self->out_conn != NULL) && ((self->out_conn->validated & CONNECTION_VALIDATED) != CONNECTION_VALIDATED))
-            self->out_conn = list_item_next(self->out_conn);
+            self->out_conn = list_wrap_around(self->channel.connections, self->out_conn, stop);
 
         if(self->out_conn == NULL) {
+            self->out_conn = stop;
             PT_YIELD(&pt);
-            self->out_conn = list_head(self->channel.connections);
+            if(self->out_conn == NULL)
+                self->out_conn = list_head(self->channel.connections);
             continue;
         }else
             break;
@@ -160,6 +172,8 @@ PT_THREAD(zmq_socket_send_round_robin_block(zmq_socket_t *self, zmq_msg_t *msg))
     zmtp_connection_add_out_msg(self->out_conn, msg);
     zmtp_process_post(zmq_socket_output_activity, self->out_conn);
     PT_WAIT_UNTIL(&pt, self->out_conn->out_size <= 0);
+
+    self->out_conn = list_wrap_around(self->channel.connections, self->out_conn, NULL);
 
     PT_END(&pt);
 }
