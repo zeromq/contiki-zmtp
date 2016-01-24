@@ -44,6 +44,10 @@ Limitations:
   #define ZMTP_MAX_SUB_TOPICS 10
 #endif
 
+#ifndef ZMTP_MAX_SUB_TOPIC_LISTS
+  #define ZMTP_MAX_SUB_TOPIC_LISTS 3*ZMTP_MAX_SUB_TOPICS
+#endif
+
 #ifndef ZMTP_MAX_CONNECTIONS
   #define ZMTP_MAX_CONNECTIONS 10
 #endif
@@ -62,6 +66,10 @@ enum {
     ZMQ_MSG_COMMAND = 4,
 };
 
+typedef enum {
+    ZMQ_SUBSCRIBE,
+} zmq_sockopt_t;
+
 struct _zmq_msg_t {
     struct _zmq_msg_t *next; // For whenever we list messages
     uint8_t flags;                 //  Flags byte for message
@@ -71,12 +79,18 @@ struct _zmq_msg_t {
 };
 typedef struct _zmq_msg_t zmq_msg_t;
 
-struct _zmq_sub_topic_t {
-    struct _zmq_sub_topic_t *next;
-    uint8_t *topic;
+struct _zmtp_sub_topic_t {
+    uint8_t *data;
     uint8_t size;
 };
-typedef struct _zmq_sub_topic_t zmq_sub_topic_t;
+typedef struct _zmtp_sub_topic_t zmtp_sub_topic_t;
+
+// A list item container because we need to make different lists with the same objects
+struct _zmtp_sub_topic_item_t {
+    struct _zmtp_sub_topic_item_t *next;
+    zmtp_sub_topic_t *topic;
+};
+typedef struct _zmtp_sub_topic_item_t zmtp_sub_topic_item_t;
 
 struct zmtp_connection {
     struct zmtp_connection *next; // For list usage
@@ -99,8 +113,9 @@ struct zmtp_connection {
     int out_hwm; // Not used at the moment
     int out_size;
 
-    // For a PUB socket
-    LIST_STRUCT(sub_topics);
+    // For a PUB: list of topic the peer is interested in
+    // For a SUB: list of topic we already subscribed
+    LIST_STRUCT(subscribed_topics);
 
     // For a ROUTER socker
     // uint8_t *identity; // Not used at the moment
@@ -123,6 +138,7 @@ typedef enum {
 struct _zmtp_channel_t {
     LIST_STRUCT(connections);
     zmq_socket_type_t socket_type;
+    LIST_STRUCT(subscribe_topics); // Master list of topics to subscribe to (for SUB only)
 
     // How to signal back to our client protothread
     struct process *notify_process_input;
@@ -149,10 +165,12 @@ typedef struct zmq_socket zmq_socket_t;
 
 process_event_t zmq_socket_input_activity;
 process_event_t zmq_socket_output_activity;
+process_event_t zmq_socket_add_subscription;
 
 void zmq_init();
 int zmq_connect(zmq_socket_t *self, const char *host, unsigned short port);
 int zmq_bind (zmq_socket_t *self, unsigned short port);
+int zmq_setsockopt(zmq_socket_t *self, zmq_sockopt_t opt, void *data);
 
 void zmq_socket_init(zmq_socket_t *self, zmq_socket_type_t socket_type);
 

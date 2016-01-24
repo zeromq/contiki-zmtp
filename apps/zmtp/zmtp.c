@@ -25,6 +25,7 @@ PROCESS(zmtp_process, "ZMTP process");
 
 static int zmtp_tcp_input(struct tcp_socket *s, void *conn_ptr, const uint8_t *inputptr, int inputdatalen);
 static void zmtp_tcp_event(struct tcp_socket *s, void *conn_ptr, tcp_socket_event_t ev);
+PT_THREAD(zmtp_send_msg(zmtp_connection_t *conn, zmq_msg_t *msg));
 PT_THREAD(zmtp_tcp_send(zmtp_connection_t *conn, const uint8_t *data, size_t len));
 PT_THREAD(zmtp_tcp_send_inner (zmtp_connection_t *conn, const uint8_t *data, size_t len, size_t *sent));
 
@@ -46,7 +47,64 @@ static void print_data(const uint8_t *data, int data_size);
       } \
     } while(0);
 
-/*-----------------------------------------------------------*/
+/*----------------------------------------------------------------------------*/
+
+MEMB(zmtp_sub_topics, zmtp_sub_topic_t, ZMTP_MAX_SUB_TOPICS);
+
+zmtp_sub_topic_t *zmtp_sub_topic_new(const uint8_t *data, uint8_t size) {
+    zmtp_sub_topic_t *self = memb_alloc(&zmtp_sub_topics);
+    if(self == NULL) {
+        printf("ERROR: Reached exhaustion of sub topics\r\n");
+        return NULL;
+    }
+
+    self->size = size;
+    uint8_t *topic_data = malloc(self->size);
+    if(topic_data == NULL) {
+        printf("ERROR: Could not allocate memory for sub topic data\r\n");
+        memb_free(&zmtp_sub_topics, self);
+        return NULL;
+    }
+
+    memcpy(topic_data, data, self->size);
+    self->data = topic_data;
+
+    return self;
+}
+
+void zmtp_sub_topic_destroy (zmtp_sub_topic_t **self_p) {
+    if (*self_p) {
+        zmtp_sub_topic_t *self = *self_p;
+        if(self->data)
+            free(self->data);
+        memb_free(&zmtp_sub_topics, self);
+        *self_p = NULL;
+    }
+}
+
+MEMB(zmtp_sub_topic_items, zmtp_sub_topic_item_t, ZMTP_MAX_SUB_TOPIC_LISTS);
+
+zmtp_sub_topic_item_t *zmtp_sub_topic_item_new(zmtp_sub_topic_t *topic) {
+    zmtp_sub_topic_item_t *self = memb_alloc(&zmtp_sub_topic_items);
+    if(self == NULL) {
+        printf("ERROR: Reached exhaustion of sub topic items\r\n");
+        return NULL;
+    }
+
+    self->topic = topic;
+
+    return self;
+}
+
+void zmtp_sub_topic_item_destroy (zmtp_sub_topic_item_t **self_p) {
+    if (*self_p) {
+        zmtp_sub_topic_item_t *self = *self_p;
+        memb_free(&zmtp_sub_topic_items, self);
+        *self_p = NULL;
+    }
+}
+
+/*----------------------------------------------------------------------------*/
 
 #ifndef ZMTP_MAX_CHANNELS
   #define ZMTP_MAX_CHANNELS 10
@@ -71,8 +129,20 @@ void zmtp_connection_destroy (zmtp_connection_t **self_p) {
     if (*self_p) {
         zmtp_connection_t *self = *self_p;
 
-        // Shall it cleanes the in/out queues?
-        // Shall it destroys the messages in those queues? (nb. we are not owner of these objects)
+        // Shall it cleans the in/out queues?
+        // Shall it destroys the messages in those queues? (nb. we are not owner of the objects in the out queue)
+
+        zmtp_sub_topic_item_t *topic_item = list_head(self->subscribed_topics);
+        zmtp_sub_topic_item_t *next;
+        while(topic_item != NULL) {
+            if(self->channel->socket_type == ZMQ_PUB) {
+                // Only PUB socket do not share topic entry between connections
+                zmtp_sub_topic_destroy(&topic_item->topic);
+            }
+            next = list_item_next(topic_item);
+            zmtp_sub_topic_item_destroy(&topic_item);
+            topic_item = next;
+        }
 
         memb_free(&zmtp_connections, self);
         *self_p = NULL;
@@ -83,7 +153,7 @@ void zmtp_connection_init(zmtp_connection_t *self) {
     bzero(self, sizeof(zmtp_connection_t));
     LIST_STRUCT_INIT(self, in_queue);
     LIST_STRUCT_INIT(self, out_queue);
-    LIST_STRUCT_INIT(self, sub_topics);
+    LIST_STRUCT_INIT(self, subscribed_topics);
 
     self->addr_ptr = NULL;
 
@@ -167,6 +237,7 @@ void zmtp_channel_destroy (zmtp_channel_t **self_p)
 
 void zmtp_channel_init(zmtp_channel_t *self, zmq_socket_type_t socket_type, struct process *in_p, struct process *out_p) {
     LIST_STRUCT_INIT(self, connections);
+    LIST_STRUCT_INIT(self, subscribe_topics);
     self->socket_type = socket_type;
 
     self->notify_process_input = in_p;
@@ -315,11 +386,77 @@ PT_THREAD(zmtp_send_ready(zmtp_connection_t *conn)) {
     PT_END(&pt);
 }
 
+PT_THREAD(zmtp_send_subscriptions(zmtp_connection_t *conn)) {
+    LOCAL_PT(pt);
+    // PRINTF("> zmtp_send_subscriptions %d %p\r\n", pt.lc, conn);
+    PT_BEGIN(&pt);
+
+    static zmtp_sub_topic_item_t *topic_item_master = NULL;
+    static zmtp_sub_topic_item_t *topic_item_conn = NULL;
+    topic_item_master = list_head(conn->channel->subscribe_topics);
+    while(topic_item_master != NULL) {
+        topic_item_conn = list_head(conn->subscribed_topics);
+        while((topic_item_conn != NULL) && (topic_item_conn->topic != topic_item_master->topic))
+            topic_item_conn = list_item_next(topic_item_conn);
+
+        if(topic_item_conn == NULL) {
+            size_t size = topic_item_master->topic->size;
+            uint8_t *data = malloc(size+1);
+            if(data != NULL) {
+              data[0] = 1;
+              memcpy(data+1, topic_item_master->topic->data, size);
+              static zmq_msg_t *msg = NULL;
+              msg = zmq_msg_from_data(0, &data, size+1);
+              if(msg == NULL) {
+                  free(data);
+                  break;
+              }
+
+              topic_item_conn = zmtp_sub_topic_item_new(topic_item_master->topic);
+              if(topic_item_conn == NULL) {
+                  zmq_msg_destroy(&msg);
+                  break;
+              }
+
+              PT_WAIT_THREAD(&pt, zmtp_send_msg(conn, msg));
+
+              zmq_msg_destroy(&msg);
+
+              list_add(conn->subscribed_topics, topic_item_conn);
+            }else{
+                printf("ERROR: could not allocate memory for subscription message\r\n");
+                break;
+            }
+        }
+
+        topic_item_master = list_item_next(topic_item_master);
+    }
+
+    PT_END(&pt);
+}
+
+PT_THREAD(zmtp_send_subscriptions_to_all(zmtp_channel_t *channel)) {
+    LOCAL_PT(pt);
+    // PRINTF("> zmtp_send_subscriptions_to_all %d\r\n", pt.lc);
+    PT_BEGIN(&pt);
+
+    static zmtp_connection_t *conn = NULL;
+    conn = list_head(channel->connections);
+    while(conn != NULL) {
+        if((conn->validated & CONNECTION_VALIDATED) == CONNECTION_VALIDATED)
+            PT_WAIT_THREAD(&pt, zmtp_send_subscriptions(conn));
+
+        conn = list_item_next(conn);
+    }
+
+    PT_END(&pt);
+}
+
 PT_THREAD(zmtp_send_msg(zmtp_connection_t *conn, zmq_msg_t *msg)) {
     static uint8_t *buffer;
     static int total_size;
     LOCAL_PT(pt);
-    PRINTF("> zmtp_send_msg %d\r\n", pt.lc);
+    PRINTF("> zmtp_send_msg %d %p\r\n", pt.lc, msg);
     PT_BEGIN(&pt);
 
     int size_size = ((zmq_msg_size(msg) > 255) ? 8 : 1);
@@ -403,6 +540,7 @@ static process_event_t zmtp_do_remote_connected;
 static process_event_t zmtp_do_send_version_major;
 static process_event_t zmtp_do_send_greeting;
 static process_event_t zmtp_do_send_ready;
+static process_event_t zmtp_do_send_subscriptions;
 static process_event_t zmtp_call_me_again;
 static process_event_t zmtp_process_event;
 
@@ -432,6 +570,7 @@ void zmtp_init() {
         zmtp_do_send_version_major = process_alloc_event();
         zmtp_do_send_greeting = process_alloc_event();
         zmtp_do_send_ready = process_alloc_event();
+        zmtp_do_send_subscriptions = process_alloc_event();
         zmtp_call_me_again = process_alloc_event();
         zmtp_process_event = process_alloc_event();
 
@@ -472,70 +611,76 @@ int zmtp_pop_event(process_event_t *ev, void **data) {
 
 void print_event_name(process_event_t ev) {
     if(ev == zmtp_do_listen) {
-        PRINTF("zmtp_do_listen");
+        printf("zmtp_do_listen");
 
     }else if(ev == zmtp_do_connect) {
-        PRINTF("zmtp_do_connect");
+        printf("zmtp_do_connect");
 
     }else if(ev == zmtp_do_remote_connected) {
-        PRINTF("zmtp_do_remote_connected");
+        printf("zmtp_do_remote_connected");
 
     }else if(ev == zmtp_do_send_version_major) {
-        PRINTF("zmtp_do_send_version_major");
+        printf("zmtp_do_send_version_major");
 
     }else if(ev == zmtp_do_send_greeting) {
-        PRINTF("zmtp_do_send_greeting");
+        printf("zmtp_do_send_greeting");
 
     }else if(ev == zmtp_do_send_ready) {
-        PRINTF("zmtp_do_send_ready");
+        printf("zmtp_do_send_ready");
+
+    }else if(ev == zmtp_do_send_subscriptions) {
+        printf("zmtp_do_send_subscriptions");
 
     }else if(ev == zmtp_call_me_again) {
-        PRINTF("zmtp_call_me_again");
+        printf("zmtp_call_me_again");
 
     }else if(ev == zmtp_process_event) {
-        PRINTF("zmtp_process_event");
+        printf("zmtp_process_event");
 
     }else if(ev == zmq_socket_input_activity) {
-        PRINTF("zmq_socket_input_activity");
+        printf("zmq_socket_input_activity");
 
     }else if(ev == zmq_socket_output_activity) {
-        PRINTF("zmq_socket_output_activity");
+        printf("zmq_socket_output_activity");
+
+    }else if(ev == zmq_socket_add_subscription) {
+        printf("zmq_socket_add_subscription");
 
     }else if(ev == PROCESS_EVENT_NONE) {
-        PRINTF("PROCESS_EVENT_NONE");
+        printf("PROCESS_EVENT_NONE");
 
     }else if(ev == PROCESS_EVENT_INIT) {
-        PRINTF("PROCESS_EVENT_INIT");
+        printf("PROCESS_EVENT_INIT");
 
     }else if(ev == PROCESS_EVENT_POLL) {
-        PRINTF("PROCESS_EVENT_POLL");
+        printf("PROCESS_EVENT_POLL");
 
     }else if(ev == PROCESS_EVENT_EXIT) {
-        PRINTF("PROCESS_EVENT_EXIT");
+        printf("PROCESS_EVENT_EXIT");
 
     }else if(ev == PROCESS_EVENT_SERVICE_REMOVED) {
-        PRINTF("PROCESS_EVENT_SERVICE_REMOVED");
+        printf("PROCESS_EVENT_SERVICE_REMOVED");
 
     }else if(ev == PROCESS_EVENT_CONTINUE) {
-        PRINTF("PROCESS_EVENT_CONTINUE");
+        printf("PROCESS_EVENT_CONTINUE");
 
     }else if(ev == PROCESS_EVENT_MSG) {
-        PRINTF("PROCESS_EVENT_MSG");
+        printf("PROCESS_EVENT_MSG");
 
     }else if(ev == PROCESS_EVENT_EXITED) {
-        PRINTF("PROCESS_EVENT_EXITED");
+        printf("PROCESS_EVENT_EXITED");
 
     }else if(ev == PROCESS_EVENT_TIMER) {
-        PRINTF("PROCESS_EVENT_TIMER");
+        printf("PROCESS_EVENT_TIMER");
 
     }else if(ev == PROCESS_EVENT_COM) {
-        PRINTF("PROCESS_EVENT_COM");
+        printf("PROCESS_EVENT_COM");
 
     }else if(ev == PROCESS_EVENT_MAX) {
-        PRINTF("PROCESS_EVENT_MAX");
+        printf("PROCESS_EVENT_MAX");
 
     }else{
-        PRINTF("%d", ev);
+        printf("%d", ev);
     }
 }
 
@@ -770,6 +915,11 @@ static int zmtp_tcp_input(struct tcp_socket *s, void *conn_ptr, const uint8_t *i
               conn->validated |= CONNECTION_VALIDATED_READY;
               PRINTF("Validated ready\r\n");
 
+              if(conn->channel->socket_type == ZMQ_SUB) {
+                  zmtp_add_event(zmtp_do_send_subscriptions, conn);
+                  process_post(&zmtp_process, zmtp_process_event, conn);
+              }
+
               process_poll(conn->channel->notify_process_input);
               if(conn->channel->notify_process_input != conn->channel->notify_process_output)
                   process_poll(conn->channel->notify_process_output);
@@ -868,9 +1018,12 @@ PROCESS_THREAD(zmtp_process, ev, data)
       if(ev == zmtp_process_event) {
           if(zmtp_pop_event(&ev, &data) != 0)
               continue;
-          PRINTF(">> Event is now ");
+
+          #if (DEBUG) & DEBUG_PRINT
+          printf(">> Event is now ");
           print_event_name(ev);
-          PRINTF(" %p\r\n", data);
+          printf(" %p\r\n", data);
+          #endif
       }
 
       if(ev == zmtp_do_listen) {
@@ -897,6 +1050,10 @@ PROCESS_THREAD(zmtp_process, ev, data)
         process_post(&zmtp_process, zmtp_call_me_again, data);
         PROCESS_WAIT_THREAD(zmtp_send_ready(data), zmtp_do_send_ready);
 
+      }else if(ev == zmtp_do_send_subscriptions) {
+        process_post(&zmtp_process, zmtp_call_me_again, data);
+        PROCESS_WAIT_THREAD(zmtp_send_subscriptions(data), zmtp_do_send_subscriptions);
+
       }else if(ev == zmq_socket_output_activity) {
         static zmq_msg_t *msg = NULL;
         msg = zmtp_connection_pop_out_msg(data);
@@ -906,6 +1063,10 @@ PROCESS_THREAD(zmtp_process, ev, data)
         process_post(&zmtp_process, zmtp_call_me_again, data);
         PROCESS_WAIT_THREAD(zmtp_send_msg(data, msg), zmq_socket_output_activity);
         process_post(((zmtp_connection_t *) data)->channel->notify_process_output, zmq_socket_output_activity, NULL);
+
+      }else if(ev == zmq_socket_add_subscription) {
+        process_post(&zmtp_process, zmtp_call_me_again, data);
+        PROCESS_WAIT_THREAD(zmtp_send_subscriptions_to_all(data), zmq_socket_add_subscription);
 
       }
   }

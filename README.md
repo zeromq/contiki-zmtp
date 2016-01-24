@@ -30,7 +30,7 @@ It was not possible to implement every thing according to the RFCs. Here is a li
 - Same for output data bigger than ZMTP_OUTPUT_BUFFER_SIZE (default: 200), it will have an undefined behaviour
 - There is nothing to close/stop a socket
 - Only one PUB socket can be created
-- SUB sockets can only subscribe (but PUB do support unsubcriptions), but subscriptions will only be sent once to currently connected peer
+- SUB sockets can only subscribe (but PUB do support unsubcriptions)
 
 Known to work on
 ----------------
