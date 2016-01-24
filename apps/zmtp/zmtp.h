@@ -20,6 +20,11 @@
                               CONNECTION_VALIDATED_GREETING  | \
                               CONNECTION_VALIDATED_READY)
 
+zmtp_sub_topic_t *zmtp_sub_topic_new(const uint8_t *data, uint8_t size);
+void zmtp_sub_topic_destroy (zmtp_sub_topic_t **self_p);
+zmtp_sub_topic_item_t *zmtp_sub_topic_item_new(zmtp_sub_topic_t *topic);
+void zmtp_sub_topic_item_destroy (zmtp_sub_topic_item_t **self_p);
+
 int zmtp_connection_add_in_msg(zmtp_connection_t *self, zmq_msg_t *msg);
 zmq_msg_t *zmtp_connection_pop_in_msg(zmtp_connection_t *self);
 int zmtp_connection_add_out_msg(zmtp_connection_t *self, zmq_msg_t *msg);

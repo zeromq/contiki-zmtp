@@ -12,6 +12,6 @@
 #include "zmtp.h"
 
 void zmq_sub_init(zmq_socket_t *self);
-PT_THREAD(zmq_sub_subscribe(zmq_socket_t *self, const char *topic));
+int zmq_sub_subscribe(zmq_socket_t *self, const char *topic);
 
 #endif

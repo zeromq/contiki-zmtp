@@ -27,6 +27,7 @@ void zmq_init() {
     if(init_done == 0) {
         zmq_socket_input_activity = process_alloc_event();
         zmq_socket_output_activity = process_alloc_event();
+        zmq_socket_add_subscription = process_alloc_event();
 
         zmtp_init();
     }
@@ -38,6 +39,21 @@ int zmq_connect(zmq_socket_t *self, const char *host, unsigned short port) {
 
 int zmq_bind (zmq_socket_t *self, unsigned short port) {
     return zmtp_listen(&self->channel, port);
+}
+
+int zmq_setsockopt(zmq_socket_t *self, zmq_sockopt_t opt, void *data) {
+    switch(opt) {
+      case ZMQ_SUBSCRIBE:
+        if(self->channel.socket_type != ZMQ_SUB) {
+            printf("ERROR: cannot set socket option SUBSCRIBE on something else than a SUB\r\n");
+            return 0;
+        }
+        return zmq_sub_subscribe(self, data);
+        break;
+      default:
+        printf("ERROR: invalid socket option %d\r\n", opt);
+        return 0;
+    }
 }
 
 /*----------------------------------------------------------------------------*/

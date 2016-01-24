@@ -15,7 +15,6 @@
 
 
 PROCESS(zmq_pub_subscription_receiver, "ZMQ PUB subscription receiver");
-MEMB(zmq_sub_topics, zmq_sub_topic_t, ZMTP_MAX_SUB_TOPICS);
 
 void zmq_pub_init(zmq_socket_t *self) {
     self->in_conn = NULL;
@@ -29,55 +28,53 @@ void zmq_pub_init(zmq_socket_t *self) {
 }
 
 void do_subscribe(zmtp_connection_t *conn, zmq_msg_t *msg) {
-    zmq_sub_topic_t *topic = memb_alloc(&zmq_sub_topics);
-    if(topic == NULL) {
-        printf("ERROR: Reached exhaustion of sub topics\r\n");
+    zmtp_sub_topic_t *topic = zmtp_sub_topic_new(zmq_msg_data(msg) + 1, zmq_msg_size(msg) - 1);
+    if(topic == NULL)
+        return;
+
+    zmtp_sub_topic_item_t *topic_item = zmtp_sub_topic_item_new(topic);
+    if(topic_item == NULL) {
+        zmtp_sub_topic_destroy(&topic);
         return;
     }
 
-    topic->size = zmq_msg_size(msg) - 1;
-    uint8_t *topic_data = malloc(topic->size);
-    if(topic_data == NULL) {
-        printf("ERROR: Could not allocate memory for sub topic data\r\n");
-        memb_free(&zmq_sub_topics, topic);
-        return;
-    }
+    list_add(conn->subscribed_topics, topic_item);
 
-    memcpy(topic_data, zmq_msg_data(msg)+1, topic->size);
-    topic->topic = topic_data;
-    list_add(conn->sub_topics, topic);
-
+    #if (DEBUG) & DEBUG_PRINT
     printf("Added subscription: ");
-    uint8_t *pos = topic->topic;
-    while(pos < (topic->topic + topic->size))
+    uint8_t *pos = topic->data;
+    while(pos < (topic->data + topic->size))
         printf("%c", *pos++);
     printf("\r\n");
+    #endif
 }
 
 void do_unsubscribe(zmtp_connection_t *conn, zmq_msg_t *msg) {
     const uint8_t *topic_data = zmq_msg_data(msg) + 1;
     uint8_t topic_size = zmq_msg_size(msg) - 1;
 
-    zmq_sub_topic_t *topic = list_head(conn->sub_topics);
-    while((topic != NULL) && (topic->size == topic_size) && (!strncmp((const char *) topic->topic, (const char *) topic_data, topic_size)))
-        topic = list_item_next(topic);
+    zmtp_sub_topic_item_t *topic_item = list_head(conn->subscribed_topics);
+    while((topic_item != NULL) &&
+          (topic_item->topic->size == topic_size) &&
+          (!strncmp((const char *) topic_item->topic->data, (const char *) topic_data, topic_size)))
+        topic_item = list_item_next(topic_item);
 
-    if(topic == NULL)
+    if(topic_item == NULL)
         return;
 
-    list_remove(conn->sub_topics, topic);
-    free(topic->topic);
-    memb_free(&zmq_sub_topics, topic);
+    list_remove(conn->subscribed_topics, topic_item);
+    zmtp_sub_topic_destroy(&topic_item->topic);
+    zmtp_sub_topic_item_destroy(&topic_item);
 }
 
 uint8_t match_subscriptions(zmtp_connection_t *conn, zmq_msg_t *msg) {
-    zmq_sub_topic_t *topic = list_head(conn->sub_topics);
-    while(topic != NULL) {
-        if(topic->size <= zmq_msg_size(msg)) {
-            if(!strncmp((const char *) topic->topic, (const char *) zmq_msg_data(msg), topic->size))
+    zmtp_sub_topic_item_t *topic_item = list_head(conn->subscribed_topics);
+    while(topic_item != NULL) {
+        if(topic_item->topic->size <= zmq_msg_size(msg)) {
+            if(!strncmp((const char *) topic_item->topic->data, (const char *) zmq_msg_data(msg), topic_item->topic->size))
                 return 1;
         }
-        topic = list_item_next(topic);
+        topic_item = list_item_next(topic_item);
     }
     return 0;
 }
